@@ -18,6 +18,7 @@
 
 
 import dobotArm
+import humanSafety
 import lib.DobotDllType as dType
 import numpy as np
 import cv2
@@ -30,6 +31,11 @@ Z_SAFE = 40 #what is the clearance distance for the robot arm to avoid collision
 Z_PICK = -25 #what is the  height for the robot claw to successfully pick up the target?
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
+
+# --- SAFETY: pixel bounding box (x1, y1, x2, y2) of the robot workspace in the camera frame.
+# Hands detected inside this box will stop the arm. Adjust to match your camera view.
+# Set to None to monitor the entire frame.
+WORKSPACE_PIXELS = None  # example: (100, 80, 540, 400)
 
 machine_state = "scanning plate" 
 
@@ -185,14 +191,13 @@ def phase_detect_targets():
 # if you are picking up rigid car parts, would you still be able to move directly to the object and to the drop zone? 
 # Do you need collision avoidance? Think about if the robot gripper accidentally hits the plate or other parts on the way to the target, what would happen? How would you modify the robot's movement logic to avoid collisions?
 # ---------------------------------------------------------
-def phase_execute_batch(api, pick_list, drop_list):
-    cv2.VideoCapture(0)
+def phase_execute_batch(api, pick_list, drop_list, safety_monitor=None):
     time.sleep(0.5)
-    
+
     if len(pick_list) == 0 or len(drop_list) == 0:
         print("missing targets, aborting")
         return False
-    
+
     # Match 1 part to 1 drop zone (uses the smaller count)
     batch_size = min(len(pick_list), len(drop_list))
     print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
@@ -204,19 +209,19 @@ def phase_execute_batch(api, pick_list, drop_list):
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
 
         # --- PICK SEQUENCE ---
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, safety_monitor=safety_monitor)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK, safety_monitor=safety_monitor)
         #optional alternate function call method to include a rotation of the gripper angle
-        #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45) 
+        #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45, safety_monitor=safety_monitor)
 
         dobotArm.close_gripper(api)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, safety_monitor=safety_monitor)
 
         # --- PLACE SEQUENCE ---
-        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE, safety_monitor=safety_monitor)
         dobotArm.open_gripper(api)
         dobotArm.stop_pump(api)
-        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE, safety_monitor=safety_monitor)
 
     # irl, it is ok for 1 dish to contain multiple parts
     # if len(pick_list) > len(drop_list):
@@ -247,6 +252,15 @@ dobotArm.initialize_robot(api)
 dobotArm.open_gripper(api)
 dobotArm.stop_pump(api)
 
+# Build the safety monitor once. It shares the same cap object.
+# The monitor is only started during phase 3 so it doesn't interfere with
+# phases 1 & 2 which also read from cap.
+safety_monitor = humanSafety.HumanSafetyMonitor(
+    cap,
+    undistort_maps=(map1, map2),
+    workspace_pixels=WORKSPACE_PIXELS,
+)
+
 while machine_state == "scanning plate":
     drop_zone = phase_detect_plates()
     if drop_zone is not None:
@@ -260,10 +274,15 @@ while machine_state == "scanning target":
 
 
 while machine_state == "pick place":
-    completed = phase_execute_batch(api, pick_target, drop_zone)
+    # Start the safety monitor right before the arm begins moving.
+    # The main thread no longer reads from cap during this phase.
+    safety_monitor.start()
+    completed = phase_execute_batch(api, pick_target, drop_zone, safety_monitor)
+    safety_monitor.stop()
     if completed:
         next_state()
-    else: break
+    else:
+        break
 
 
 cap.release()
