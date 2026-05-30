@@ -37,12 +37,21 @@ PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered
 # Set to None to monitor the entire frame.
 WORKSPACE_PIXELS = None  # example: (100, 80, 540, 400)
 
+from collections import defaultdict, deque
+coord_histories = defaultdict(lambda: deque(maxlen=5)) # 5 frame window
+
+# average detection over set number of frames
+# uses dictionary to separate items
+def get_stable_target(idx, new_x, new_y):
+    coord_histories[idx].append((new_x, new_y))
+    return np.mean(coord_histories[idx], axis=0)
+
 machine_state = "scanning plate" 
 
 # --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
 # MAKE SURE THAT YOU HAVE RAN calibrateCamera.py FIRST TO GENERATE THE camera_params.npz FILE
 api = dType.load()
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 H_matrix = np.load("HomographyMatrix.npy")
 data = np.load("./camera_params.npz")
 camera_matrix = data["camera_matrix"]
@@ -95,7 +104,7 @@ def phase_detect_plates():
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blurred = cv2.medianBlur(gray, 7)
-        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 150, param1=100, param2=35, minRadius=25, maxRadius=55)
+        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 150, param1=100, param2=35, minRadius=15, maxRadius=65)  # radius 
 
         current_list = []
         if circles is not None:
@@ -142,22 +151,27 @@ def phase_detect_targets():
         display_frame = frame.copy()
         
         # Red Tag Logic
-        hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array([0,120,70]), np.array([10,255,255])) + \
-               cv2.inRange(hsv, np.array([170,120,70]), np.array([180,255,255]))
+        hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5,5), 0), cv2.COLOR_BGR2HSV) # increased range for gaussian blur (larger sample size)
+        mask = cv2.inRange(hsv, np.array([0,100,50]), np.array([10,255,255])) + \
+               cv2.inRange(hsv, np.array([160,120,70]), np.array([180,255,255])) # increased range for hue values, decreased S/V mins
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         current_list = []
-        for cnt in contours:
-            if cv2.contourArea(cnt) > 800:
-                M = cv2.moments(cnt)
-                if M["m00"] != 0:
-                    cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-                    rx, ry = pixel_to_robot(cx, cy, H_matrix)
-                    current_list.append((rx, ry))
-                    # Draw on display_frame only
-                    cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
+
+        valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 150] # decreased necessary size of red objects
+        
+        for idx, cnt in enumerate(valid_contours):
+            M = cv2.moments(cnt)
+            if M["m00"] != 0:
+                cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                rx, ry = pixel_to_robot(cx, cy, H_matrix)
+                
+                smooth_x, smooth_y = get_stable_target(idx, rx, ry)             # averages over 5 frames
+                current_list.append((smooth_x, smooth_y))
+        
+                # Draw on display_frame only
+                cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
                     
         cv2.waitKey(1)
 
@@ -224,21 +238,24 @@ def phase_execute_batch(api, pick_list, drop_list, safety_monitor=None):
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE, safety_monitor=safety_monitor)
 
     # irl, it is ok for 1 dish to contain multiple parts
-    # if len(pick_list) > len(drop_list):
-    #     for i in range(len(pick_list)):
-    #         pick_x, pick_y = pick_list[i]
-    #         drop_x, drop_y = drop_list[0]
-    #         # --- PICK SEQUENCE ---
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
-    #         dobotArm.close_gripper(api)
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+    if len(pick_list) > len(drop_list):
+         drop_x, drop_y = drop_list[0]      # same destination for all parts
+         for i in range(len(pick_list)):
+             pick_x, pick_y = pick_list[i]
+             # --- PICK SEQUENCE ---
+             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+             time.sleep(0.2)                # pauses for a moment before closing gripper
+             dobotArm.close_gripper(api)
+             time.sleep(0.5)                # gives gripper time to fully close
+             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+             time.sleep(0.1)
 
-    #     # --- PLACE SEQUENCE ---
-    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
-    #         dobotArm.open_gripper(api)
-    #         dobotArm.stop_pump(api)
-    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+         # --- PLACE SEQUENCE ---
+             dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+             dobotArm.open_gripper(api)
+             dobotArm.stop_pump(api)
+             dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     print("\nBatch Complete.")
     return True

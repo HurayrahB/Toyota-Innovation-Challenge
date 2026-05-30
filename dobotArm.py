@@ -29,7 +29,7 @@ def initialize_robot(api):
         exit()
     
     #we've found it, so let's try to connect
-    state = dType.ConnectDobot(api, "COM7", 115200)[0]
+    state = dType.ConnectDobot(api, "COM5", 115200)[0]
     
     #If the connection failed at this point, we also can't proceed, so we need to exit
     if state != dType.DobotConnect.DobotConnect_NoError:
