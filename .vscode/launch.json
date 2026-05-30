@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Hand Detection",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/hand_detection.py",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Run Hand Control (Robot)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/hand_control.py",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

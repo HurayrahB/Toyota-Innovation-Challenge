@@ -97,6 +97,34 @@ Note: if you are using a different camera as provided in the challenge, you need
 a basic script implementing a detect part/pick place function has been provided to you as a starter code.Check the code comments to see what it does. Feel free to base your solution off of this script, or feel free to created something new!
 
 
+## Hand Detection Script
+`hand_detection.py` uses MediaPipe Hands to detect and label hands in the live camera feed.
+
+Install the required packages:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Run the script:
+
+```bash
+python hand_detection.py
+```
+
+If `python` is not available on your machine, use `python3` or run the virtualenv interpreter directly:
+
+```bash
+./.venv/bin/python hand_detection.py
+```
+
+On macOS, the first launch may fail until camera access is enabled for the terminal or editor in `System Settings > Privacy & Security > Camera`.
+
+For VS Code users, the repo also includes a ready-to-run `Run Hand Detection` launch configuration after the virtual environment has been created and dependencies have been installed.
+
+
 
 ## Basic Robot Control
 Refer to `testDobot.py` for basic Dobot control codes
@@ -133,5 +161,3 @@ undistorted = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
 
 - Option C - pose estimation with solvePnP:
   `cv2.solvePnP(obj_pts, img_pts, camera_matrix, dist_coeffs)`
-
-
