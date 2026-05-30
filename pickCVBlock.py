@@ -145,7 +145,7 @@ def next_state():
 def phase_detect_plates():
     print("\n[PHASE 1] Scanning for drop zones. Waiting for stability...")
     stability_counter = 0
-    last_positions = []
+    last_count = 0
     
     while True:
         ret, frame = cap.read()
@@ -165,11 +165,11 @@ def phase_detect_plates():
                 current_list.append((rx, ry))
 
         # --- AUTO-LOCK LOGIC ---
-        if points_are_stable(current_list, last_positions, PIXEL_TOLERANCE):
+        if len(current_list) > 0 and len(current_list) == last_count:
             stability_counter += 1
         else:
             stability_counter = 0
-        last_positions = current_list
+            last_count = len(current_list)
 
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
         cv2.putText(display_frame, f"LOCKING PLATES: {progress}%", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
@@ -179,7 +179,6 @@ def phase_detect_plates():
         if stability_counter >= STABILITY_LIMIT:
             print(f"Locked {len(current_list)} plates.")
             return current_list
-  
  
 
 # ---------------------------------------------------------
