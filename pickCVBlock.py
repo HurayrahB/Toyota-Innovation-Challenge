@@ -28,8 +28,18 @@ import time
 
 Z_SAFE = 40 #what is the clearance distance for the robot arm to avoid collisions when moving horizontally?
 Z_PICK = -25 #what is the  height for the robot claw to successfully pick up the target?
+Z_APPROACH = -8 #staging height above the target before the final pick descent
+Z_PLACE = 0 #slower release height above the plate for a more consistent drop-off
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
+TARGET_MIN_AREA = 250 #smaller velcro tags need a lower contour threshold than the starter code used
+RETRY_LIMIT = 2
+SHOW_MASK_WINDOW = True
+
+LOWER_RED_1 = np.array([0, 80, 50])
+UPPER_RED_1 = np.array([15, 255, 255])
+LOWER_RED_2 = np.array([165, 80, 50])
+UPPER_RED_2 = np.array([180, 255, 255])
 
 machine_state = "scanning plate" 
 
@@ -53,6 +63,61 @@ def pixel_to_robot(u, v, H):
     xy = H @ p
     xy /= xy[2]
     return xy[0], xy[1]
+
+
+def sort_points(points):
+    return sorted(points, key=lambda point: (point[0], point[1]))
+
+
+def points_are_stable(current_points, last_points, tolerance):
+    if len(current_points) == 0 or len(current_points) != len(last_points):
+        return False
+
+    sorted_current = sort_points(current_points)
+    sorted_last = sort_points(last_points)
+
+    for current_point, last_point in zip(sorted_current, sorted_last):
+        if np.hypot(current_point[0] - last_point[0], current_point[1] - last_point[1]) > tolerance:
+            return False
+
+    return True
+
+
+def build_red_mask(frame):
+    hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, LOWER_RED_1, UPPER_RED_1)
+    mask += cv2.inRange(hsv, LOWER_RED_2, UPPER_RED_2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    return mask
+
+
+def detect_targets(frame):
+    mask = build_red_mask(frame)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    detections = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < TARGET_MIN_AREA:
+            continue
+
+        M = cv2.moments(cnt)
+        if M["m00"] == 0:
+            continue
+
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        rx, ry = pixel_to_robot(cx, cy, H_matrix)
+        detections.append({
+            "pixel": (cx, cy),
+            "robot": (rx, ry),
+            "area": area,
+            "contour": cnt,
+        })
+
+    detections.sort(key=lambda detection: (detection["robot"][0], detection["robot"][1]))
+    return detections, mask
 
 
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
@@ -80,7 +145,7 @@ def next_state():
 def phase_detect_plates():
     print("\n[PHASE 1] Scanning for drop zones. Waiting for stability...")
     stability_counter = 0
-    last_count = 0
+    last_positions = []
     
     while True:
         ret, frame = cap.read()
@@ -100,11 +165,11 @@ def phase_detect_plates():
                 current_list.append((rx, ry))
 
         # --- AUTO-LOCK LOGIC ---
-        if len(current_list) > 0 and len(current_list) == last_count:
+        if points_are_stable(current_list, last_positions, PIXEL_TOLERANCE):
             stability_counter += 1
         else:
             stability_counter = 0
-            last_count = len(current_list)
+        last_positions = current_list
 
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
         cv2.putText(display_frame, f"LOCKING PLATES: {progress}%", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
@@ -125,43 +190,38 @@ def phase_detect_plates():
 def phase_detect_targets():
     print("\n[PHASE 2] Scanning for targets. Waiting for stability...")
     stability_counter = 0
-    last_count = 0
+    last_positions = []
     
     while True:
         ret, frame = cap.read()
         if not ret: continue
         
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
-        # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
-        
-        # Red Tag Logic
-        hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array([0,120,70]), np.array([10,255,255])) + \
-               cv2.inRange(hsv, np.array([170,120,70]), np.array([180,255,255]))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        current_list = []
-        for cnt in contours:
-            if cv2.contourArea(cnt) > 800:
-                M = cv2.moments(cnt)
-                if M["m00"] != 0:
-                    cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-                    rx, ry = pixel_to_robot(cx, cy, H_matrix)
-                    current_list.append((rx, ry))
-                    # Draw on display_frame only
-                    cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
-                    
-        cv2.waitKey(1)
+        detections, mask = detect_targets(frame)
+        current_list = [detection["robot"] for detection in detections]
+
+        for detection in detections:
+            cx, cy = detection["pixel"]
+            cv2.drawContours(display_frame, [detection["contour"]], -1, (0, 255, 0), 2)
+            cv2.circle(display_frame, (cx, cy), 4, (255, 255, 0), -1)
+            cv2.putText(
+                display_frame,
+                f"A={int(detection['area'])}",
+                (cx + 8, cy - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 255, 255),
+                1,
+            )
 
         # --- STABILITY LOGIC ---
-        if len(current_list) != 0:
-            if len(current_list) > 0 and len(current_list) == last_count:
-                stability_counter += 1
-            else:
-                stability_counter = 0
-                last_count = len(current_list)
+        if points_are_stable(current_list, last_positions, PIXEL_TOLERANCE):
+            stability_counter += 1
+        else:
+            stability_counter = 0
+        last_positions = current_list
 
         # Visual Feedback
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
@@ -170,12 +230,13 @@ def phase_detect_targets():
         cv2.putText(display_frame, f"LOCKING TARGETS: {progress}%", (20, 40), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         cv2.imshow("Detection", display_frame)
+        if SHOW_MASK_WINDOW:
+            cv2.imshow("Red Mask", mask)
+        cv2.waitKey(1)
         
         # --- EXIT CONDITION ---
         if stability_counter >= STABILITY_LIMIT:
             print(f"[SUCCESS] Locked {len(current_list)} targets.")
-            #cv2.waitKey(500) # Brief pause so you can see the 100%
-    
             return current_list
 
 
@@ -203,19 +264,31 @@ def phase_execute_batch(api, pick_list, drop_list):
 
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
 
-        # --- PICK SEQUENCE ---
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
-        #optional alternate function call method to include a rotation of the gripper angle
-        #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45) 
+        picked = False
+        for attempt in range(1, RETRY_LIMIT + 1):
+            print(f"  Pick attempt {attempt}/{RETRY_LIMIT}")
 
-        dobotArm.close_gripper(api)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+            # Use a staged descent so the arm does not dive straight into the workspace.
+            dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+            dobotArm.move_to_xyz(api, pick_x, pick_y, Z_APPROACH)
+            dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+            dobotArm.close_gripper(api)
+            time.sleep(0.25)
+            dobotArm.move_to_xyz(api, pick_x, pick_y, Z_APPROACH)
+            dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+            picked = True
+            break
+
+        if not picked:
+            print("  Unable to secure the target, rescanning is required.")
+            return False
 
         # --- PLACE SEQUENCE ---
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_PLACE)
         dobotArm.open_gripper(api)
         dobotArm.stop_pump(api)
+        time.sleep(0.2)
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     # irl, it is ok for 1 dish to contain multiple parts
@@ -247,23 +320,28 @@ dobotArm.initialize_robot(api)
 dobotArm.open_gripper(api)
 dobotArm.stop_pump(api)
 
-while machine_state == "scanning plate":
-    drop_zone = phase_detect_plates()
-    if drop_zone is not None:
-        next_state()
+while True:
+    if machine_state == "scanning plate":
+        drop_zone = phase_detect_plates()
+        if drop_zone is not None:
+            next_state()
+        continue
 
+    if machine_state == "scanning target":
+        pick_target = phase_detect_targets()
+        if pick_target is not None:
+            next_state()
+        continue
 
-while machine_state == "scanning target":
-    pick_target = phase_detect_targets()
-    if pick_target is not None:
-        next_state()
+    if machine_state == "pick place":
+        completed = phase_execute_batch(api, pick_target, drop_zone)
+        if completed:
+            next_state()
+        else:
+            machine_state = "scanning target"
+        continue
 
-
-while machine_state == "pick place":
-    completed = phase_execute_batch(api, pick_target, drop_zone)
-    if completed:
-        next_state()
-    else: break
+    break
 
 
 cap.release()
