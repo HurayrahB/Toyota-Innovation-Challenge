@@ -31,14 +31,14 @@ Z_PICK = -25 #what is the  height for the robot claw to successfully pick up the
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
 
-from collections import deque
-coord_history = deque(maxlen=5) # 5 frame window
+from collections import defaultdict, deque
+coord_histories = defaultdict(lambda: deque(maxlen=5)) # 5 frame window
 
 # average detection over set number of frames
-# currently only works with 1 target at a time, as all items are merged into the same history
-def get_stable_target(new_x, new_y):
-    coord_history.append((new_x, new_y))
-    return np.mean(coord_history, axis=0)
+# uses dictionary to separate items
+def get_stable_target(idx, new_x, new_y):
+    coord_histories[idx].append((new_x, new_y))
+    return np.mean(coord_histories[idx], axis=0)
 
 machine_state = "scanning plate" 
 
@@ -152,18 +152,20 @@ def phase_detect_targets():
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         current_list = []
-        for cnt in contours:
-            if cv2.contourArea(cnt) > 150: # decreased necessary size of red objects
-                M = cv2.moments(cnt)
-                if M["m00"] != 0:
-                    cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-                    rx, ry = pixel_to_robot(cx, cy, H_matrix)
-                    
-                    smooth_x, smooth_y = get_stable_target(rx, ry) # smoothes rx, ry before appending
-                    current_list.append((smooth_x, smooth_y))
-            
-                    # Draw on display_frame only
-                    cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
+
+        valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 150] # decreased necessary size of red objects
+        
+        for idx, cnt in enumerate(valid_contours):
+            M = cv2.moments(cnt)
+            if M["m00"] != 0:
+                cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                rx, ry = pixel_to_robot(cx, cy, H_matrix)
+                
+                smooth_x, smooth_y = get_stable_target(idx, rx, ry)             # averages over 5 frames
+                current_list.append((smooth_x, smooth_y))
+        
+                # Draw on display_frame only
+                cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
                     
         cv2.waitKey(1)
 
@@ -198,7 +200,6 @@ def phase_detect_targets():
 # Do you need collision avoidance? Think about if the robot gripper accidentally hits the plate or other parts on the way to the target, what would happen? How would you modify the robot's movement logic to avoid collisions?
 # ---------------------------------------------------------
 def phase_execute_batch(api, pick_list, drop_list):
-    cv2.VideoCapture(0)
     time.sleep(0.5)
     
     if len(pick_list) == 0 or len(drop_list) == 0:
@@ -231,21 +232,24 @@ def phase_execute_batch(api, pick_list, drop_list):
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     # irl, it is ok for 1 dish to contain multiple parts
-    # if len(pick_list) > len(drop_list):
-    #     for i in range(len(pick_list)):
-    #         pick_x, pick_y = pick_list[i]
-    #         drop_x, drop_y = drop_list[0]
-    #         # --- PICK SEQUENCE ---
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
-    #         dobotArm.close_gripper(api)
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+    if len(pick_list) > len(drop_list):
+         drop_x, drop_y = drop_list[0]      # same destination for all parts
+         for i in range(len(pick_list)):
+             pick_x, pick_y = pick_list[i]
+             # --- PICK SEQUENCE ---
+             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+             time.sleep(0.2)                # pauses for a moment before closing gripper
+             dobotArm.close_gripper(api)
+             time.sleep(0.5)                # gives gripper time to fully close
+             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+             time.sleep(0.1)
 
-    #     # --- PLACE SEQUENCE ---
-    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
-    #         dobotArm.open_gripper(api)
-    #         dobotArm.stop_pump(api)
-    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+         # --- PLACE SEQUENCE ---
+             dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+             dobotArm.open_gripper(api)
+             dobotArm.stop_pump(api)
+             dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     print("\nBatch Complete.")
     return True
