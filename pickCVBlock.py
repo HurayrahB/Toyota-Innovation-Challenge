@@ -1,6 +1,6 @@
 #This code is a simplified implementation of a collaborative robotics system that detects plates and targets using computer vision, 
-#and then commands a Dobot robotic arm to pick and place objects accordingly. The system operates in three phases: scanning for plates, 
-#scanning for targets, and executing the pick/place operations. 
+#and then commands a Dobot robotic arm to pick and place objects accordingly. The system operates in four phases: scanning for plates,
+#scanning for targets, scanning for hands, and executing the pick/place operations.
 #Stability checks are implemented to ensure reliable detection before proceeding to the next phase.
 
 # Note: there are parameters that are useful to the successful operation of the robot arm. Read through the code before running the program.
@@ -9,7 +9,7 @@
 # 1. Ensure you have the Dobot robotic arm set up and connected to your computer.
 # 2. Place the plates (drop zones) and targets (red blocks) within the camera's
 # field of view.
-# 3. Run the script. The system will first scan for plates, then targets, and finally execute the pick/place operations based on the detected positions.
+# 3. Run the script. The system will scan for plates, then targets, then check for hands, and finally execute the pick/place operations based on the detected positions.
 # 4. Monitor the console output and the video feed for feedback on the system's status and operations
 
 #Other Useful Codes you can use:
@@ -23,6 +23,11 @@ import numpy as np
 import cv2
 import time
 
+try:
+    import mediapipe as mp
+except ImportError:
+    mp = None
+
 
 """CONSTANTS"""
 
@@ -35,6 +40,10 @@ PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered
 TARGET_MIN_AREA = 250 #smaller velcro tags need a lower contour threshold than the starter code used
 RETRY_LIMIT = 2
 SHOW_MASK_WINDOW = True
+HAND_CLEAR_LIMIT = 45
+MAX_HANDS = 2
+HAND_DETECTION_CONFIDENCE = 0.6
+HAND_TRACKING_CONFIDENCE = 0.5
 
 LOWER_RED_1 = np.array([0, 80, 50])
 UPPER_RED_1 = np.array([15, 255, 255])
@@ -57,6 +66,20 @@ ret, frame = cap.read()
 h, w = frame.shape[:2]
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
 map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
+
+if mp is not None:
+    mp_hands = mp.solutions.hands
+    mp_drawing = mp.solutions.drawing_utils
+    hand_detector = mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=MAX_HANDS,
+        min_detection_confidence=HAND_DETECTION_CONFIDENCE,
+        min_tracking_confidence=HAND_TRACKING_CONFIDENCE,
+    )
+else:
+    mp_hands = None
+    mp_drawing = None
+    hand_detector = None
 
 def pixel_to_robot(u, v, H):
     p = np.array([u, v, 1])
@@ -120,6 +143,47 @@ def detect_targets(frame):
     return detections, mask
 
 
+def detect_hands(frame):
+    if hand_detector is None or mp_hands is None:
+        raise RuntimeError(
+            "MediaPipe is not installed. Install it with 'pip install mediapipe' before running hand detection."
+        )
+
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hand_detector.process(rgb_frame)
+
+    hand_regions = []
+    if not results.multi_hand_landmarks:
+        return hand_regions
+
+    frame_height, frame_width = frame.shape[:2]
+    handedness_list = results.multi_handedness or []
+
+    for index, hand_landmarks in enumerate(results.multi_hand_landmarks):
+        x_coords = [landmark.x for landmark in hand_landmarks.landmark]
+        y_coords = [landmark.y for landmark in hand_landmarks.landmark]
+
+        x_min = max(0, int(min(x_coords) * frame_width))
+        y_min = max(0, int(min(y_coords) * frame_height))
+        x_max = min(frame_width, int(max(x_coords) * frame_width))
+        y_max = min(frame_height, int(max(y_coords) * frame_height))
+
+        label = "Hand"
+        score = 0.0
+        if index < len(handedness_list) and handedness_list[index].classification:
+            label = handedness_list[index].classification[0].label
+            score = handedness_list[index].classification[0].score
+
+        hand_regions.append({
+            "bbox": (x_min, y_min, x_max - x_min, y_max - y_min),
+            "landmarks": hand_landmarks,
+            "label": label,
+            "score": score,
+        })
+
+    return hand_regions
+
+
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
 # THIS STATE MACHINE IS TOO SIMPLE. Can you think of logics that should change the robot's sequnece of actions?
 # Ex: what if the robot fails to pick up a target? should it retry? should it go back to scanning for targets in case the target was moved? what if a new plate is added during the pick/place phase?
@@ -130,6 +194,8 @@ def next_state():
     if machine_state == "scanning plate":
         machine_state = "scanning target"
     elif machine_state == "scanning target":
+        machine_state = "scanning hand"
+    elif machine_state == "scanning hand":
         machine_state = "pick place"
     elif machine_state == "pick place":
         machine_state = "scanning plate"
@@ -218,7 +284,7 @@ def phase_detect_targets():
             )
 
         # --- STABILITY LOGIC ---
-        if points_are_stable(current_list, last_positions, PIXEL_TOLERANCE):
+        if points_are_stable(current_pixels, last_positions, PIXEL_TOLERANCE):
             stability_counter += 1
         else:
             stability_counter = 0
@@ -237,12 +303,71 @@ def phase_detect_targets():
         
         # --- EXIT CONDITION ---
         if stability_counter >= STABILITY_LIMIT:
-            print(f"[SUCCESS] Locked {len(current_list)} targets.")
+            print(f"[SUCCESS] Locked {len(current_robots)} targets.")
             return current_robots
 
 
 # ---------------------------------------------------------
-# PHASE 3: PICK/PLACE LOOP
+# PHASE 3: DETECT HUMAN HANDS IN THE WORKSPACE
+# This phase pauses robot motion until the workspace has been clear of hands for a short period.
+# ---------------------------------------------------------
+def phase_detect_hands():
+    print("\n[PHASE 3] Checking workspace for hands before robot motion...")
+    clear_counter = 0
+    hand_present_last_frame = False
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        display_frame = frame.copy()
+        hand_regions = detect_hands(frame)
+
+        if hand_regions:
+            if not hand_present_last_frame:
+                print("[ALERT] Hand detected in workspace. Robot is waiting.")
+            hand_present_last_frame = True
+            clear_counter = 0
+
+            for region in hand_regions:
+                x, y, w_box, h_box = region["bbox"]
+                cv2.rectangle(display_frame, (x, y), (x + w_box, y + h_box), (0, 0, 255), 2)
+                mp_drawing.draw_landmarks(
+                    display_frame,
+                    region["landmarks"],
+                    mp_hands.HAND_CONNECTIONS,
+                )
+                cv2.putText(
+                    display_frame,
+                    f"{region['label']} {region['score']:.2f}",
+                    (x, max(20, y - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 255),
+                    2,
+                )
+        else:
+            if hand_present_last_frame:
+                print("[INFO] Workspace looks clear. Verifying before motion resumes.")
+            hand_present_last_frame = False
+            clear_counter += 1
+
+        progress = int((clear_counter / HAND_CLEAR_LIMIT) * 100)
+        status_text = f"WORKSPACE CLEAR: {min(progress, 100)}%"
+        status_color = (0, 255, 0) if not hand_regions else (0, 0, 255)
+        cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+        cv2.imshow("Hand Detection", display_frame)
+        cv2.waitKey(1)
+
+        if clear_counter >= HAND_CLEAR_LIMIT:
+            print("[SUCCESS] Workspace clear. Proceeding to robot motion.")
+            return True
+
+
+# ---------------------------------------------------------
+# PHASE 4: PICK/PLACE LOOP
 # This function assumes 1 drop zone only has 1 part, and executes the pick/place operations in batches.
 # if you are picking up rigid car parts, would you still be able to move directly to the object and to the drop zone? 
 # Do you need collision avoidance? Think about if the robot gripper accidentally hits the plate or other parts on the way to the target, what would happen? How would you modify the robot's movement logic to avoid collisions?
@@ -257,13 +382,16 @@ def phase_execute_batch(api, pick_list, drop_list):
     
     # Match 1 part to 1 drop zone (uses the smaller count)
     batch_size = min(len(pick_list), len(drop_list))
-    print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
+    print(f"\n[PHASE 4] Executing batch of {batch_size} operations.")
 
     for i in range(batch_size):
         pick_x, pick_y = pick_list[i]
         drop_x, drop_y = drop_list[i]
 
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
+
+        if not phase_detect_hands():
+            return False
 
         picked = False
         for attempt in range(1, RETRY_LIMIT + 1):
@@ -331,6 +459,12 @@ while True:
     if machine_state == "scanning target":
         pick_target = phase_detect_targets()
         if pick_target is not None:
+            next_state()
+        continue
+
+    if machine_state == "scanning hand":
+        workspace_clear = phase_detect_hands()
+        if workspace_clear:
             next_state()
         continue
 
