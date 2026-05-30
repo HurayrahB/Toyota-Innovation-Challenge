@@ -12,7 +12,7 @@ CON_STR = {
     dType.DobotConnect.DobotConnect_Occupied: "DobotConnect_Occupied"
 }
 
-cam = cv2.VideoCapture(0)
+cam = cv2.VideoCapture(1)
 
 if not cam.isOpened():
     print("Camera failed to open")

@@ -45,7 +45,7 @@ machine_state = "scanning plate"
 # --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
 # MAKE SURE THAT YOU HAVE RAN calibrateCamera.py FIRST TO GENERATE THE camera_params.npz FILE
 api = dType.load()
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 H_matrix = np.load("HomographyMatrix.npy")
 data = np.load("./camera_params.npz")
 camera_matrix = data["camera_matrix"]
