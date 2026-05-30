@@ -18,7 +18,6 @@
 
 
 import dobotArm
-import humanSafety
 import lib.DobotDllType as dType
 import numpy as np
 import cv2
@@ -269,15 +268,6 @@ dobotArm.initialize_robot(api)
 dobotArm.open_gripper(api)
 dobotArm.stop_pump(api)
 
-# Build the safety monitor once. It shares the same cap object.
-# The monitor is only started during phase 3 so it doesn't interfere with
-# phases 1 & 2 which also read from cap.
-safety_monitor = humanSafety.HumanSafetyMonitor(
-    cap,
-    undistort_maps=(map1, map2),
-    workspace_pixels=WORKSPACE_PIXELS,
-)
-
 while machine_state == "scanning plate":
     drop_zone = phase_detect_plates()
     if drop_zone is not None:
@@ -288,18 +278,6 @@ while machine_state == "scanning target":
     pick_target = phase_detect_targets()
     if pick_target is not None:
         next_state()
-
-
-while machine_state == "pick place":
-    # Start the safety monitor right before the arm begins moving.
-    # The main thread no longer reads from cap during this phase.
-    safety_monitor.start()
-    completed = phase_execute_batch(api, pick_target, drop_zone, safety_monitor)
-    safety_monitor.stop()
-    if completed:
-        next_state()
-    else:
-        break
 
 
 cap.release()
