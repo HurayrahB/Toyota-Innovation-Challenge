@@ -31,6 +31,15 @@ Z_PICK = -25 #what is the  height for the robot claw to successfully pick up the
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
 
+from collections import deque
+coord_history = deque(maxlen=5) # 5 frame window
+
+# average detection over set number of frames
+# currently only works with 1 target at a time, as all items are merged into the same history
+def get_stable_target(new_x, new_y):
+    coord_history.append((new_x, new_y))
+    return np.mean(coord_history, axis=0)
+
 machine_state = "scanning plate" 
 
 # --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
@@ -136,20 +145,23 @@ def phase_detect_targets():
         display_frame = frame.copy()
         
         # Red Tag Logic
-        hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array([0,120,70]), np.array([10,255,255])) + \
-               cv2.inRange(hsv, np.array([170,120,70]), np.array([180,255,255]))
+        hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5,5), 0), cv2.COLOR_BGR2HSV) # increased range for gaussian blur (larger sample size)
+        mask = cv2.inRange(hsv, np.array([0,100,50]), np.array([10,255,255])) + \
+               cv2.inRange(hsv, np.array([160,120,70]), np.array([180,255,255])) # increased range for hue values, decreased S/V mins
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         current_list = []
         for cnt in contours:
-            if cv2.contourArea(cnt) > 800:
+            if cv2.contourArea(cnt) > 150: # decreased necessary size of red objects
                 M = cv2.moments(cnt)
                 if M["m00"] != 0:
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
                     rx, ry = pixel_to_robot(cx, cy, H_matrix)
-                    current_list.append((rx, ry))
+                    
+                    smooth_x, smooth_y = get_stable_target(rx, ry) # smoothes rx, ry before appending
+                    current_list.append((smooth_x, smooth_y))
+            
                     # Draw on display_frame only
                     cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
                     
