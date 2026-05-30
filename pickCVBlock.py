@@ -200,7 +200,9 @@ def phase_detect_targets():
         display_frame = frame.copy()
 
         detections, mask = detect_targets(frame)
-        current_list = [detection["robot"] for detection in detections]
+
+        current_pixels = [detection["pixel"] for detection in detections]
+        current_robots = [detection["robot"] for detection in detections]
 
         for detection in detections:
             cx, cy = detection["pixel"]
@@ -221,7 +223,7 @@ def phase_detect_targets():
             stability_counter += 1
         else:
             stability_counter = 0
-        last_positions = current_list
+        last_positions = current_pixels
 
         # Visual Feedback
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
@@ -237,7 +239,7 @@ def phase_detect_targets():
         # --- EXIT CONDITION ---
         if stability_counter >= STABILITY_LIMIT:
             print(f"[SUCCESS] Locked {len(current_list)} targets.")
-            return current_list
+            return current_robots
 
 
 # ---------------------------------------------------------
