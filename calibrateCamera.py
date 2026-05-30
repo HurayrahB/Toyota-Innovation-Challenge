@@ -2,6 +2,14 @@ import cv2
 import numpy as np
 import argparse
 import os
+import sys
+
+# Check if cv2.aruco is available (Dobot Lab's environment might not have it)
+if not hasattr(cv2, 'aruco'):
+    print("\n[ERROR] The 'cv2.aruco' module is missing!")
+    print("This usually happens because Dobot Lab's built-in Python environment does not include 'opencv-contrib-python'.")
+    print("To fix this, please run 'calibrateCamera.py' on your LOCAL computer to generate 'camera_params.npz', and upload that file to Dobot Lab instead.")
+    sys.exit(1)
 
 # ─────────────────────────────────────────────
 # BOARD CONFIGURATION (unchanged - uses your existing printed GridBoard)

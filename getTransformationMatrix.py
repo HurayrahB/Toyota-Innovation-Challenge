@@ -19,7 +19,7 @@ if not cam.isOpened():
     exit()
     
 #if the program errors for file path problems, copy the relative path to camera_params.npz and paste it here and try again. 
-data = np.load("Collaborative_Robotics\camera_params.npz")
+data = np.load("camera_params.npz")
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
