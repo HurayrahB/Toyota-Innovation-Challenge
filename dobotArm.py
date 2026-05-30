@@ -78,11 +78,28 @@ def initialize_robot(api):
 """
     CHANGE: Switched from using Cartesian Linear to a Joint Space PTP mode
 """
-def move_to_xyz(api,x,y,z,rHead=0):
-    cmdIndx = -1
-    execCmd = dType.SetPTPCmd(api,dType.PTPMode.PTPMOVJXYZMode,x,y,z,rHead,isQueued=0)[0]
-    #Allow the command to complete. The robot will stop moving when it's done
+def move_to_xyz(api, x, y, z, rHead=0, safety_monitor=None):
+    # Block before starting the move if a human is already detected
+    if safety_monitor:
+        safety_monitor.wait_for_clear()
+
+    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, rHead, isQueued=0)[0]
+
     while execCmd > dType.GetQueuedCmdCurrentIndex(api)[0]:
+        if safety_monitor and safety_monitor.is_human_detected():
+            print("[SAFETY] Human detected mid-move — force stopping arm.")
+            dType.SetQueuedCmdForceStopExec(api)
+            dType.SetQueuedCmdClear(api)
+
+            safety_monitor.wait_for_clear()
+
+            # Clear any stall/alarm the abrupt stop may have triggered
+            dType.ClearAllAlarmsState(api)
+            dType.SetQueuedCmdStartExec(api)
+
+            # Re-issue the original destination so the move completes
+            execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, rHead, isQueued=0)[0]
+
         dType.dSleep(25)
 
 """
