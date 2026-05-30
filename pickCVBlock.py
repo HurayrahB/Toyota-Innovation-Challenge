@@ -1,6 +1,6 @@
 #This code is a simplified implementation of a collaborative robotics system that detects plates and targets using computer vision, 
-#and then commands a Dobot robotic arm to pick and place objects accordingly. The system operates in four phases: scanning for plates,
-#scanning for targets, scanning for hands, and executing the pick/place operations.
+#and then commands a Dobot robotic arm to pick and place objects accordingly. The system operates in three phases: scanning for plates, 
+#scanning for targets, and executing the pick/place operations. 
 #Stability checks are implemented to ensure reliable detection before proceeding to the next phase.
 
 # Note: there are parameters that are useful to the successful operation of the robot arm. Read through the code before running the program.
@@ -9,7 +9,7 @@
 # 1. Ensure you have the Dobot robotic arm set up and connected to your computer.
 # 2. Place the plates (drop zones) and targets (red blocks) within the camera's
 # field of view.
-# 3. Run the script. The system will scan for plates, then targets, then check for hands, and finally execute the pick/place operations based on the detected positions.
+# 3. Run the script. The system will first scan for plates, then targets, and finally execute the pick/place operations based on the detected positions.
 # 4. Monitor the console output and the video feed for feedback on the system's status and operations
 
 #Other Useful Codes you can use:
@@ -23,32 +23,24 @@ import numpy as np
 import cv2
 import time
 
-try:
-    import mediapipe as mp
-except ImportError:
-    mp = None
-
 
 """CONSTANTS"""
 
 Z_SAFE = 40 #what is the clearance distance for the robot arm to avoid collisions when moving horizontally?
 Z_PICK = -25 #what is the  height for the robot claw to successfully pick up the target?
-Z_APPROACH = -8 #staging height above the target before the final pick descent
-Z_PLACE = 0 #slower release height above the plate for a more consistent drop-off
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
-TARGET_MIN_AREA = 250 #smaller velcro tags need a lower contour threshold than the starter code used
-RETRY_LIMIT = 2
-SHOW_MASK_WINDOW = True
-HAND_CLEAR_LIMIT = 45
-MAX_HANDS = 2
-HAND_DETECTION_CONFIDENCE = 0.6
-HAND_TRACKING_CONFIDENCE = 0.5
+SHOW_HAND_WINDOW = True
+HAND_MIN_AREA = 4500
 
-LOWER_RED_1 = np.array([0, 80, 50])
-UPPER_RED_1 = np.array([15, 255, 255])
-LOWER_RED_2 = np.array([165, 80, 50])
-UPPER_RED_2 = np.array([180, 255, 255])
+from collections import defaultdict, deque
+coord_histories = defaultdict(lambda: deque(maxlen=5)) # 5 frame window
+
+# average detection over set number of frames
+# uses dictionary to separate items
+def get_stable_target(idx, new_x, new_y):
+    coord_histories[idx].append((new_x, new_y))
+    return np.mean(coord_histories[idx], axis=0)
 
 machine_state = "scanning plate" 
 
@@ -67,20 +59,6 @@ h, w = frame.shape[:2]
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
 map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
 
-if mp is not None:
-    mp_hands = mp.solutions.hands
-    mp_drawing = mp.solutions.drawing_utils
-    hand_detector = mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=MAX_HANDS,
-        min_detection_confidence=HAND_DETECTION_CONFIDENCE,
-        min_tracking_confidence=HAND_TRACKING_CONFIDENCE,
-    )
-else:
-    mp_hands = None
-    mp_drawing = None
-    hand_detector = None
-
 def pixel_to_robot(u, v, H):
     p = np.array([u, v, 1])
     xy = H @ p
@@ -88,100 +66,58 @@ def pixel_to_robot(u, v, H):
     return xy[0], xy[1]
 
 
-def sort_points(points):
-    return sorted(points, key=lambda point: (point[0], point[1]))
-
-
-def points_are_stable(current_points, last_points, tolerance):
-    if len(current_points) == 0 or len(current_points) != len(last_points):
-        return False
-
-    sorted_current = sort_points(current_points)
-    sorted_last = sort_points(last_points)
-
-    for current_point, last_point in zip(sorted_current, sorted_last):
-        if np.hypot(current_point[0] - last_point[0], current_point[1] - last_point[1]) > tolerance:
-            return False
-
-    return True
-
-
-def build_red_mask(frame):
-    hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, LOWER_RED_1, UPPER_RED_1)
-    mask += cv2.inRange(hsv, LOWER_RED_2, UPPER_RED_2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-    return mask
-
-
-def detect_targets(frame):
-    mask = build_red_mask(frame)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    detections = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < TARGET_MIN_AREA:
-            continue
-
-        M = cv2.moments(cnt)
-        if M["m00"] == 0:
-            continue
-
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
-        rx, ry = pixel_to_robot(cx, cy, H_matrix)
-        detections.append({
-            "pixel": (cx, cy),
-            "robot": (rx, ry),
-            "area": area,
-            "contour": cnt,
-        })
-
-    detections.sort(key=lambda detection: (detection["robot"][0], detection["robot"][1]))
-    return detections, mask
-
-
 def detect_hands(frame):
-    if hand_detector is None or mp_hands is None:
-        raise RuntimeError(
-            "MediaPipe is not installed. Install it with 'pip install mediapipe' before running hand detection."
-        )
+    blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+    ycrcb = cv2.cvtColor(blurred, cv2.COLOR_BGR2YCrCb)
 
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = hand_detector.process(rgb_frame)
+    lower_skin = np.array([0, 135, 85], dtype=np.uint8)
+    upper_skin = np.array([255, 180, 135], dtype=np.uint8)
+    mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
 
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     hand_regions = []
-    if not results.multi_hand_landmarks:
-        return hand_regions
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < HAND_MIN_AREA:
+            continue
 
-    frame_height, frame_width = frame.shape[:2]
-    handedness_list = results.multi_handedness or []
-
-    for index, hand_landmarks in enumerate(results.multi_hand_landmarks):
-        x_coords = [landmark.x for landmark in hand_landmarks.landmark]
-        y_coords = [landmark.y for landmark in hand_landmarks.landmark]
-
-        x_min = max(0, int(min(x_coords) * frame_width))
-        y_min = max(0, int(min(y_coords) * frame_height))
-        x_max = min(frame_width, int(max(x_coords) * frame_width))
-        y_max = min(frame_height, int(max(y_coords) * frame_height))
-
-        label = "Hand"
-        score = 0.0
-        if index < len(handedness_list) and handedness_list[index].classification:
-            label = handedness_list[index].classification[0].label
-            score = handedness_list[index].classification[0].score
-
+        x, y, w_box, h_box = cv2.boundingRect(contour)
         hand_regions.append({
-            "bbox": (x_min, y_min, x_max - x_min, y_max - y_min),
-            "landmarks": hand_landmarks,
-            "label": label,
-            "score": score,
+            "bbox": (x, y, w_box, h_box),
+            "contour": contour,
+            "area": area,
         })
 
     return hand_regions
+
+
+def show_hand_detection(frame):
+    if not SHOW_HAND_WINDOW:
+        return
+
+    display_frame = frame.copy()
+    hand_regions = detect_hands(frame)
+
+    for region in hand_regions:
+        x, y, w_box, h_box = region["bbox"]
+        cv2.drawContours(display_frame, [region["contour"]], -1, (0, 0, 255), 2)
+        cv2.rectangle(display_frame, (x, y), (x + w_box, y + h_box), (0, 0, 255), 2)
+        cv2.putText(
+            display_frame,
+            f"HAND A={int(region['area'])}",
+            (x, max(20, y - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 0, 255),
+            2,
+        )
+
+    status_text = "HAND DETECTED" if hand_regions else "NO HAND DETECTED"
+    status_color = (0, 0, 255) if hand_regions else (0, 255, 0)
+    cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+    cv2.imshow("Hand Detection", display_frame)
 
 
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
@@ -194,8 +130,6 @@ def next_state():
     if machine_state == "scanning plate":
         machine_state = "scanning target"
     elif machine_state == "scanning target":
-        machine_state = "scanning hand"
-    elif machine_state == "scanning hand":
         machine_state = "pick place"
     elif machine_state == "pick place":
         machine_state = "scanning plate"
@@ -240,11 +174,13 @@ def phase_detect_plates():
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
         cv2.putText(display_frame, f"LOCKING PLATES: {progress}%", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.imshow("Detection", display_frame)
+        show_hand_detection(frame)
         cv2.waitKey(1)
 
         if stability_counter >= STABILITY_LIMIT:
             print(f"Locked {len(current_list)} plates.")
             return current_list
+  
  
 
 # ---------------------------------------------------------
@@ -255,40 +191,48 @@ def phase_detect_plates():
 def phase_detect_targets():
     print("\n[PHASE 2] Scanning for targets. Waiting for stability...")
     stability_counter = 0
-    last_positions = []
+    last_count = 0
     
     while True:
         ret, frame = cap.read()
         if not ret: continue
         
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
+        
+        # Red Tag Logic
+        hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5,5), 0), cv2.COLOR_BGR2HSV) # increased range for gaussian blur (larger sample size)
+        mask = cv2.inRange(hsv, np.array([0,100,50]), np.array([10,255,255])) + \
+               cv2.inRange(hsv, np.array([160,120,70]), np.array([180,255,255])) # increased range for hue values, decreased S/V mins
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        detections, mask = detect_targets(frame)
+        current_list = []
 
-        current_pixels = [detection["pixel"] for detection in detections]
-        current_robots = [detection["robot"] for detection in detections]
-
-        for detection in detections:
-            cx, cy = detection["pixel"]
-            cv2.drawContours(display_frame, [detection["contour"]], -1, (0, 255, 0), 2)
-            cv2.circle(display_frame, (cx, cy), 4, (255, 255, 0), -1)
-            cv2.putText(
-                display_frame,
-                f"A={int(detection['area'])}",
-                (cx + 8, cy - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (0, 255, 255),
-                1,
-            )
+        valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 150] # decreased necessary size of red objects
+        
+        for idx, cnt in enumerate(valid_contours):
+            M = cv2.moments(cnt)
+            if M["m00"] != 0:
+                cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                rx, ry = pixel_to_robot(cx, cy, H_matrix)
+                
+                smooth_x, smooth_y = get_stable_target(idx, rx, ry)             # averages over 5 frames
+                current_list.append((smooth_x, smooth_y))
+        
+                # Draw on display_frame only
+                cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
+                    
+        cv2.waitKey(1)
 
         # --- STABILITY LOGIC ---
-        if points_are_stable(current_pixels, last_positions, PIXEL_TOLERANCE):
-            stability_counter += 1
-        else:
-            stability_counter = 0
-        last_positions = current_pixels
+        if len(current_list) != 0:
+            if len(current_list) > 0 and len(current_list) == last_count:
+                stability_counter += 1
+            else:
+                stability_counter = 0
+                last_count = len(current_list)
 
         # Visual Feedback
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
@@ -297,83 +241,23 @@ def phase_detect_targets():
         cv2.putText(display_frame, f"LOCKING TARGETS: {progress}%", (20, 40), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         cv2.imshow("Detection", display_frame)
-        if SHOW_MASK_WINDOW:
-            cv2.imshow("Red Mask", mask)
-        cv2.waitKey(1)
+        show_hand_detection(frame)
         
         # --- EXIT CONDITION ---
         if stability_counter >= STABILITY_LIMIT:
-            print(f"[SUCCESS] Locked {len(current_robots)} targets.")
-            return current_robots
+            print(f"[SUCCESS] Locked {len(current_list)} targets.")
+            #cv2.waitKey(500) # Brief pause so you can see the 100%
+    
+            return current_list
 
 
 # ---------------------------------------------------------
-# PHASE 3: DETECT HUMAN HANDS IN THE WORKSPACE
-# This phase pauses robot motion until the workspace has been clear of hands for a short period.
-# ---------------------------------------------------------
-def phase_detect_hands():
-    print("\n[PHASE 3] Checking workspace for hands before robot motion...")
-    clear_counter = 0
-    hand_present_last_frame = False
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-
-        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
-        display_frame = frame.copy()
-        hand_regions = detect_hands(frame)
-
-        if hand_regions:
-            if not hand_present_last_frame:
-                print("[ALERT] Hand detected in workspace. Robot is waiting.")
-            hand_present_last_frame = True
-            clear_counter = 0
-
-            for region in hand_regions:
-                x, y, w_box, h_box = region["bbox"]
-                cv2.rectangle(display_frame, (x, y), (x + w_box, y + h_box), (0, 0, 255), 2)
-                mp_drawing.draw_landmarks(
-                    display_frame,
-                    region["landmarks"],
-                    mp_hands.HAND_CONNECTIONS,
-                )
-                cv2.putText(
-                    display_frame,
-                    f"{region['label']} {region['score']:.2f}",
-                    (x, max(20, y - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2,
-                )
-        else:
-            if hand_present_last_frame:
-                print("[INFO] Workspace looks clear. Verifying before motion resumes.")
-            hand_present_last_frame = False
-            clear_counter += 1
-
-        progress = int((clear_counter / HAND_CLEAR_LIMIT) * 100)
-        status_text = f"WORKSPACE CLEAR: {min(progress, 100)}%"
-        status_color = (0, 255, 0) if not hand_regions else (0, 0, 255)
-        cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-        cv2.imshow("Hand Detection", display_frame)
-        cv2.waitKey(1)
-
-        if clear_counter >= HAND_CLEAR_LIMIT:
-            print("[SUCCESS] Workspace clear. Proceeding to robot motion.")
-            return True
-
-
-# ---------------------------------------------------------
-# PHASE 4: PICK/PLACE LOOP
+# PHASE 3: PICK/PLACE LOOP
 # This function assumes 1 drop zone only has 1 part, and executes the pick/place operations in batches.
 # if you are picking up rigid car parts, would you still be able to move directly to the object and to the drop zone? 
 # Do you need collision avoidance? Think about if the robot gripper accidentally hits the plate or other parts on the way to the target, what would happen? How would you modify the robot's movement logic to avoid collisions?
 # ---------------------------------------------------------
 def phase_execute_batch(api, pick_list, drop_list):
-    cv2.VideoCapture(0)
     time.sleep(0.5)
     
     if len(pick_list) == 0 or len(drop_list) == 0:
@@ -382,7 +266,7 @@ def phase_execute_batch(api, pick_list, drop_list):
     
     # Match 1 part to 1 drop zone (uses the smaller count)
     batch_size = min(len(pick_list), len(drop_list))
-    print(f"\n[PHASE 4] Executing batch of {batch_size} operations.")
+    print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
 
     for i in range(batch_size):
         pick_x, pick_y = pick_list[i]
@@ -390,52 +274,40 @@ def phase_execute_batch(api, pick_list, drop_list):
 
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
 
-        if not phase_detect_hands():
-            return False
+        # --- PICK SEQUENCE ---
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+        #optional alternate function call method to include a rotation of the gripper angle
+        #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45) 
 
-        picked = False
-        for attempt in range(1, RETRY_LIMIT + 1):
-            print(f"  Pick attempt {attempt}/{RETRY_LIMIT}")
-
-            # Use a staged descent so the arm does not dive straight into the workspace.
-            dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-            dobotArm.move_to_xyz(api, pick_x, pick_y, Z_APPROACH)
-            dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
-            dobotArm.close_gripper(api)
-            time.sleep(0.25)
-            dobotArm.move_to_xyz(api, pick_x, pick_y, Z_APPROACH)
-            dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-            picked = True
-            break
-
-        if not picked:
-            print("  Unable to secure the target, rescanning is required.")
-            return False
+        dobotArm.close_gripper(api)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
 
         # --- PLACE SEQUENCE ---
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
-        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_PLACE)
         dobotArm.open_gripper(api)
         dobotArm.stop_pump(api)
-        time.sleep(0.2)
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     # irl, it is ok for 1 dish to contain multiple parts
-    # if len(pick_list) > len(drop_list):
-    #     for i in range(len(pick_list)):
-    #         pick_x, pick_y = pick_list[i]
-    #         drop_x, drop_y = drop_list[0]
-    #         # --- PICK SEQUENCE ---
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
-    #         dobotArm.close_gripper(api)
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+    if len(pick_list) > len(drop_list):
+         drop_x, drop_y = drop_list[0]      # same destination for all parts
+         for i in range(len(pick_list)):
+             pick_x, pick_y = pick_list[i]
+             # --- PICK SEQUENCE ---
+             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+             time.sleep(0.2)                # pauses for a moment before closing gripper
+             dobotArm.close_gripper(api)
+             time.sleep(0.5)                # gives gripper time to fully close
+             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+             time.sleep(0.1)
 
-    #     # --- PLACE SEQUENCE ---
-    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
-    #         dobotArm.open_gripper(api)
-    #         dobotArm.stop_pump(api)
-    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+         # --- PLACE SEQUENCE ---
+             dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+             dobotArm.open_gripper(api)
+             dobotArm.stop_pump(api)
+             dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     print("\nBatch Complete.")
     return True
@@ -449,34 +321,23 @@ dobotArm.initialize_robot(api)
 dobotArm.open_gripper(api)
 dobotArm.stop_pump(api)
 
-while True:
-    if machine_state == "scanning plate":
-        drop_zone = phase_detect_plates()
-        if drop_zone is not None:
-            next_state()
-        continue
+while machine_state == "scanning plate":
+    drop_zone = phase_detect_plates()
+    if drop_zone is not None:
+        next_state()
 
-    if machine_state == "scanning target":
-        pick_target = phase_detect_targets()
-        if pick_target is not None:
-            next_state()
-        continue
 
-    if machine_state == "scanning hand":
-        workspace_clear = phase_detect_hands()
-        if workspace_clear:
-            next_state()
-        continue
+while machine_state == "scanning target":
+    pick_target = phase_detect_targets()
+    if pick_target is not None:
+        next_state()
 
-    if machine_state == "pick place":
-        completed = phase_execute_batch(api, pick_target, drop_zone)
-        if completed:
-            next_state()
-        else:
-            machine_state = "scanning target"
-        continue
 
-    break
+while machine_state == "pick place":
+    completed = phase_execute_batch(api, pick_target, drop_zone)
+    if completed:
+        next_state()
+    else: break
 
 
 cap.release()
