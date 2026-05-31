@@ -177,6 +177,8 @@ def phase_detect_targets():
 # PHASE 3: PICK/PLACE LOOP
 # ---------------------------------------------------------
 def phase_execute_batch(api, pick_list, drop_list):
+    dType.SetQueuedCmdClear(api)
+    dType.SetQueuedCmdStartExec(api)        # clears queue between movement
     time.sleep(0.5)
     
     if len(pick_list) == 0 or len(drop_list) == 0:
@@ -193,14 +195,19 @@ def phase_execute_batch(api, pick_list, drop_list):
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
 
         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+        time.sleep(0.6)
         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+        time.sleep(0.6)
 
         dobotArm.close_gripper(api)
+        time.sleep(0.6)
         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+        time.sleep(0.6)
 
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
         dobotArm.open_gripper(api)
         dobotArm.stop_pump(api)
+        time.sleep(0.4)
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     if len(pick_list) > len(drop_list):
