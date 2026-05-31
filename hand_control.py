@@ -161,6 +161,10 @@ def map_hand_to_robot(hand_landmarks, frame_shape, H_matrix):
     wrist = hand_landmarks.landmark[0]
     px    = int(wrist.x * w)
     py    = int(wrist.y * h)
+    # The display frame is horizontally flipped (cv2.flip(frame, 1)) so the
+    # camera acts like a mirror. Un-flip the X pixel coordinate before
+    # projecting through the homography, which was calibrated on unflipped frames.
+    px    = w - px
     p     = np.array([px, py, 1.0], dtype=np.float64)
     xy    = H_matrix @ p
     xy   /= xy[2]
@@ -363,12 +367,12 @@ def main():
             if not ret:
                 continue
 
-            frame = cv2.flip(frame, 1)
-
+            # Detect on raw frame so homography coordinates are not mirrored.
+            # Flip only the display copy so the preview looks natural to the user.
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             rgb.flags.writeable = False
             results = detector.process(rgb)
-            frame.flags.writeable = True
+            frame = cv2.flip(frame, 1)
 
             raw       = "NONE"
             confirmed = None
