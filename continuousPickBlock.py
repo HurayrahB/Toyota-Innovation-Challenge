@@ -72,6 +72,22 @@ def track_green_block(frame, display_frame):
             cv2.drawContours(display_frame, [cnt], -1, (255, 255, 0), 2)
             cv2.putText(display_frame, f"Green: ({rx:.1f}, {ry:.1f})", (cx, cy - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
+# ---------------------------------------------------------
+# ENSURE VALID POSITIONING HELPER FUNCTION
+# ---------------------------------------------------------
+def is_valid_position(x, y, z):
+    # Dobot Magician safe workspace (mm)
+    if not (150 < x < 320):
+        print(f"[ERROR] X out of range: {x:.1f}")
+        return False
+    if not (-150 < y < 150):
+        print(f"[ERROR] Y out of range: {y:.1f}")
+        return False
+    if not (-60 < z < 150):
+        print(f"[ERROR] Z out of range: {z:.1f}")
+        return False
+    return True
+
 
 # ---------------------------------------------------------
 # PHASE 1: DETECT Part Drop Zones (Plates)
@@ -198,6 +214,13 @@ def phase_execute_batch(api, pick_list, drop_list):
         drop_x, drop_y = drop_list[i]
 
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
+
+        if not is_valid_position(pick_x, pick_y, Z_PICK):
+            print("Skipping invalid pick position")
+            continue
+        if not is_valid_position(drop_x, drop_y, Z_SAFE):
+            print("Skipping invalid drop position")
+            continue
 
         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
         time.sleep(0.6)
