@@ -3,13 +3,16 @@ hand_control.py — Gesture-controlled Dobot Magician arm via MediaPipe Hands.
 
 Gesture map
 -----------
-Open palm  (5 fingers) → TRACK   : arm follows your hand's XY position at hover height
-Index only (1 finger)  → MOVE UP : raise end-effector by Z_STEP mm
-Peace sign (2 fingers) → MOVE DN : lower end-effector by Z_STEP mm
-Fist       (0 fingers) → GRIP    : toggle gripper closed / open
-3 fingers              → RELEASE : open gripper (safe override)
-Thumb up               → HOME    : return to home position, open gripper
-No clear gesture       → HOLD    : arm stays at last position (natural pause)
+Open palm   (5 fingers) → TRACK      : arm follows your hand's XY position at hover height
+Index only  (1 finger)  → MOVE UP    : raise end-effector by Z_STEP mm
+Peace sign  (2 fingers) → MOVE DOWN  : lower end-effector by Z_STEP mm
+Fist        (0 fingers) → GRIP       : toggle gripper closed / open
+3 fingers               → OPEN GRIP  : open gripper (safe override)
+Thumb up                → HOME       : return to home position, open gripper
+Pinky only              → MOVE LEFT  : move arm in -Y direction by Y_STEP mm
+Ring only               → MOVE RIGHT : move arm in +Y direction by Y_STEP mm
+Middle only             → BOMB       : plunge arm to lowest Z position (WS_Z[0])
+No clear gesture        → HOLD       : arm stays at last position
 
 Safety: if the wrist landmark maps into the robot's physical workspace on the
 table, any gesture is overridden with HOLD so the arm never moves toward a hand
@@ -54,7 +57,9 @@ DEBOUNCE_FRAMES    = 18       # frames a gesture must hold before it fires
 TRACK_DEADZONE_MM  = 8        # mm — minimum hand movement to trigger a TRACK move
 Z_HOVER            = 50       # mm — Z height used during TRACK mode
 Z_STEP             = 15       # mm — how much to raise/lower per MOVE_UP/DOWN command
-MOVE_HOLD_INTERVAL = 0.7      # seconds — repeat rate when MOVE_UP/DN gesture is held
+Y_STEP             = 15       # mm — how much to move left/right per command
+MOVE_HOLD_INTERVAL = 0.7      # seconds — repeat rate when directional gesture is held
+THUMB_THRESHOLD    = 0.04     # normalised units — how far thumb must stick out
 
 # Safe workspace bounds (mm in Dobot frame). Arm will not be commanded outside these.
 WS_X = (150, 310)
@@ -74,11 +79,11 @@ def _fingers_extended(lm, handedness):
     middle_up = lm[12].y < lm[10].y
     ring_up   = lm[16].y < lm[14].y
     pinky_up  = lm[20].y < lm[18].y
-    # Thumb uses x-axis; direction flips between left/right hand
+    # Thumb: requires clearly extended past knuckle (less sensitive)
     if handedness == "Right":
-        thumb_up = lm[4].x < lm[3].x
+        thumb_up = (lm[3].x - lm[4].x) > THUMB_THRESHOLD
     else:
-        thumb_up = lm[4].x > lm[3].x
+        thumb_up = (lm[4].x - lm[3].x) > THUMB_THRESHOLD
     return thumb_up, index_up, middle_up, ring_up, pinky_up
 
 
@@ -90,13 +95,19 @@ def classify_gesture(hand_landmarks, handedness="Right"):
     if thumb and not idx and not mid and not ring and not pinky:
         return "HOME"
 
+    # Middle finger only → BOMB (plunge to lowest Z)
+    if mid and not idx and not ring and not pinky and not thumb:
+        return "BOMB"
+
     n = sum([thumb, idx, mid, ring, pinky])
 
-    if n == 5:                                         return "TRACK"
-    if n == 0:                                         return "GRIP_TOGGLE"
-    if idx and not mid and not ring and not pinky:     return "MOVE_UP"
-    if idx and mid and not ring and not pinky:         return "MOVE_DN"
-    if idx and mid and ring and not pinky:             return "OPEN_GRIP"
+    if n == 5:                                                      return "TRACK"
+    if n == 0:                                                      return "GRIP_TOGGLE"
+    if idx and not mid and not ring and not pinky:                  return "MOVE_UP"
+    if idx and mid and not ring and not pinky:                      return "MOVE_DN"
+    if idx and mid and ring and not pinky:                          return "OPEN_GRIP"
+    if pinky and not idx and not mid and not ring and not thumb:    return "MOVE_LEFT"
+    if ring and not idx and not mid and not pinky and not thumb:    return "MOVE_RIGHT"
 
     return "NONE"
 
@@ -111,10 +122,10 @@ class GestureDebouncer:
     """
 
     def __init__(self, required=DEBOUNCE_FRAMES):
-        self.required   = required
-        self.current    = "NONE"
-        self.count      = 0
-        self._fired     = False   # one-shot gate
+        self.required = required
+        self.current  = "NONE"
+        self.count    = 0
+        self._fired   = False
 
     def update(self, gesture):
         if gesture == self.current:
@@ -149,10 +160,9 @@ def map_hand_to_robot(hand_landmarks, frame_shape, H_matrix):
     wrist = hand_landmarks.landmark[0]
     px    = int(wrist.x * w)
     py    = int(wrist.y * h)
-
-    p  = np.array([px, py, 1.0], dtype=np.float64)
-    xy = H_matrix @ p
-    xy /= xy[2]
+    p     = np.array([px, py, 1.0], dtype=np.float64)
+    xy    = H_matrix @ p
+    xy   /= xy[2]
     return float(xy[0]), float(xy[1])
 
 
@@ -216,7 +226,6 @@ class RobotController:
         if drop_if_busy and self.busy.is_set():
             return
         cmd = (action, args)
-        # Remove stale queued command before inserting the new one
         try:
             self._q.get_nowait()
         except queue.Empty:
@@ -252,35 +261,52 @@ def open_camera(candidates=CAMERA_CANDIDATES):
 # ── HUD ───────────────────────────────────────────────────────────────────────
 
 _LEGEND = [
-    "Open palm   → TRACK XY",
-    "Index only  → MOVE UP",
-    "Peace sign  → MOVE DOWN",
-    "Fist        → GRIP toggle",
-    "3 fingers   → OPEN grip",
-    "Thumb up    → HOME",
-    "No gesture  → HOLD",
+    "Open palm   -> TRACK XY",
+    "Index only  -> MOVE UP",
+    "Peace sign  -> MOVE DOWN",
+    "Fist        -> GRIP toggle",
+    "3 fingers   -> OPEN grip",
+    "Thumb up    -> HOME",
+    "Pinky only  -> MOVE LEFT",
+    "Ring only   -> MOVE RIGHT",
+    "Middle only -> BOMB (lowest Z)",
+    "No gesture  -> HOLD",
 ]
+
+GESTURE_COLORS = {
+    "TRACK":       (0, 220, 0),
+    "MOVE_UP":     (0, 200, 255),
+    "MOVE_DN":     (0, 140, 255),
+    "GRIP_TOGGLE": (255, 180, 0),
+    "OPEN_GRIP":   (255, 220, 0),
+    "HOME":        (200, 0, 255),
+    "MOVE_LEFT":   (0, 255, 200),
+    "MOVE_RIGHT":  (255, 100, 200),
+    "BOMB":        (0, 0, 255),
+}
 
 
 def draw_hud(frame, raw, confirmed, rx, ry, z, gripper_closed, busy, safety):
     h, w = frame.shape[:2]
 
-    # Semi-transparent top bar
+    GREEN = (0, 220, 0)
+    AMBER = (0, 170, 255)
+    RED   = (0, 0, 220)
+    GREY  = (180, 180, 180)
+
+    # Top bar
     bar = frame.copy()
     cv2.rectangle(bar, (0, 0), (w, 115), (15, 15, 15), -1)
     cv2.addWeighted(bar, 0.55, frame, 0.45, 0, frame)
 
-    GREEN  = (0, 220, 0)
-    AMBER  = (0, 170, 255)
-    RED    = (0, 0, 220)
-    GREY   = (180, 180, 180)
+    cv2.putText(frame, f"Raw : {raw}", (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, GREY, 1)
 
-    cv2.putText(frame, f"Raw : {raw}",       (14, 30),  cv2.FONT_HERSHEY_SIMPLEX, 0.65, GREY,  1)
-    cv2.putText(frame, f"Act : {confirmed or '---'}",
-                (14, 58),  cv2.FONT_HERSHEY_SIMPLEX, 0.75,
-                GREEN if confirmed and confirmed != "NONE" else AMBER, 2)
+    act_color = GESTURE_COLORS.get(confirmed, AMBER) if confirmed and confirmed != "NONE" else AMBER
+    cv2.putText(frame, f"Act : {confirmed or '---'}", (14, 58),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, act_color, 2)
+
     cv2.putText(frame, f"XY ({rx:+.0f}, {ry:+.0f}) mm   Z {z:.0f} mm",
-                (14, 88),  cv2.FONT_HERSHEY_SIMPLEX, 0.58, GREY, 1)
+                (14, 88), cv2.FONT_HERSHEY_SIMPLEX, 0.58, GREY, 1)
 
     if safety:
         status, col = "SAFETY HOLD — hand in workspace", RED
@@ -291,12 +317,12 @@ def draw_hud(frame, raw, confirmed, rx, ry, z, gripper_closed, busy, safety):
     else:
         status, col = "READY", GREEN
 
-    cv2.putText(frame, status, (w - 310, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.65, col, 2)
+    cv2.putText(frame, status, (w - 330, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.65, col, 2)
 
     # Legend bottom-right
     for i, line in enumerate(_LEGEND):
-        cv2.putText(frame, line, (w - 268, h - len(_LEGEND) * 22 + i * 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (150, 150, 150), 1)
+        cv2.putText(frame, line, (w - 285, h - len(_LEGEND) * 20 + i * 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 150, 150), 1)
 
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
@@ -309,7 +335,7 @@ def main():
         )
     H_matrix = np.load("HomographyMatrix.npy")
 
-    # Robot setup — mirrors the pattern in testDobot.py
+    # Robot setup
     api = dType.load()
     print("Connecting to Dobot on", COM_PORT, "…")
     dobotArm.initialize_robot(api)
@@ -321,11 +347,10 @@ def main():
     dbnc   = GestureDebouncer(required=DEBOUNCE_FRAMES)
     cap    = open_camera()
 
-    # Track the arm's last commanded position so moves stay relative
     arm_x, arm_y = float(dobotArm.home_pos[0]), float(dobotArm.home_pos[1])
     arm_z = float(Z_HOVER)
 
-    last_move_time = 0.0   # for MOVE_UP/DN repeat rate while held
+    last_move_time = 0.0
 
     with mp_hands.Hands(
         static_image_mode=False,
@@ -341,7 +366,6 @@ def main():
 
             frame = cv2.flip(frame, 1)
 
-            # MediaPipe expects RGB
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             rgb.flags.writeable = False
             results = detector.process(rgb)
@@ -358,7 +382,6 @@ def main():
                 if results.multi_handedness:
                     side = results.multi_handedness[0].classification[0].label
 
-                # Draw skeleton
                 mp_drawing.draw_landmarks(
                     frame, hand, mp_hands.HAND_CONNECTIONS,
                     mp_drawing_styles.get_default_hand_landmarks_style(),
@@ -368,28 +391,24 @@ def main():
                 rx, ry = map_hand_to_robot(hand, frame.shape, H_matrix)
                 raw    = classify_gesture(hand, side)
 
-                # Safety override: freeze if hand is physically near the arm
                 if hand_in_workspace(rx, ry):
                     raw       = "NONE"
                     in_safety = True
 
                 confirmed = dbnc.update(raw)
-
-                # ── Execute commands ──────────────────────────────────────────
                 now = time.time()
 
+                # ── TRACK: continuous XY follow ───────────────────────────────
                 if confirmed == "TRACK" and dbnc.continuous():
-                    # Continuous XY tracking — only move when robot is free and
-                    # hand has shifted more than the dead-zone
                     if not robot.busy.is_set():
                         tx, ty = clamp(rx, ry, arm_z)[:2]
                         if (abs(tx - arm_x) > TRACK_DEADZONE_MM or
                                 abs(ty - arm_y) > TRACK_DEADZONE_MM):
-                            robot.send("xyz", tx, ty, arm_z, drop_if_busy=False)
+                            robot.send("xyz", tx, ty, arm_z)
                             arm_x, arm_y = tx, ty
 
+                # ── MOVE UP ───────────────────────────────────────────────────
                 elif confirmed == "MOVE_UP":
-                    # Fire once on confirm, then repeat while held
                     if dbnc.fire_once() or (dbnc.continuous() and
                                             now - last_move_time > MOVE_HOLD_INTERVAL
                                             and not robot.busy.is_set()):
@@ -398,6 +417,7 @@ def main():
                         arm_z = new_z
                         last_move_time = now
 
+                # ── MOVE DOWN ─────────────────────────────────────────────────
                 elif confirmed == "MOVE_DN":
                     if dbnc.fire_once() or (dbnc.continuous() and
                                             now - last_move_time > MOVE_HOLD_INTERVAL
@@ -407,23 +427,50 @@ def main():
                         arm_z = new_z
                         last_move_time = now
 
+                # ── MOVE LEFT (-Y) ────────────────────────────────────────────
+                elif confirmed == "MOVE_LEFT":
+                    if dbnc.fire_once() or (dbnc.continuous() and
+                                            now - last_move_time > MOVE_HOLD_INTERVAL
+                                            and not robot.busy.is_set()):
+                        new_y = clamp(arm_x, arm_y - Y_STEP, arm_z)[1]
+                        robot.send("xyz", arm_x, new_y, arm_z)
+                        arm_y = new_y
+                        last_move_time = now
+
+                # ── MOVE RIGHT (+Y) ───────────────────────────────────────────
+                elif confirmed == "MOVE_RIGHT":
+                    if dbnc.fire_once() or (dbnc.continuous() and
+                                            now - last_move_time > MOVE_HOLD_INTERVAL
+                                            and not robot.busy.is_set()):
+                        new_y = clamp(arm_x, arm_y + Y_STEP, arm_z)[1]
+                        robot.send("xyz", arm_x, new_y, arm_z)
+                        arm_y = new_y
+                        last_move_time = now
+
+                # ── GRIP TOGGLE ───────────────────────────────────────────────
                 elif confirmed == "GRIP_TOGGLE" and dbnc.fire_once():
                     if robot.gripper_closed:
                         robot.send("open")
                     else:
                         robot.send("close")
 
+                # ── OPEN GRIP ─────────────────────────────────────────────────
                 elif confirmed == "OPEN_GRIP" and dbnc.fire_once():
                     robot.send("open")
 
+                # ── HOME ──────────────────────────────────────────────────────
                 elif confirmed == "HOME" and dbnc.fire_once():
                     arm_x = float(dobotArm.home_pos[0])
                     arm_y = float(dobotArm.home_pos[1])
                     arm_z = float(Z_HOVER)
                     robot.send("home")
 
+                # ── BOMB: plunge to lowest Z ──────────────────────────────────
+                elif confirmed == "BOMB" and dbnc.fire_once():
+                    arm_z = float(WS_Z[0])
+                    robot.send("xyz", arm_x, arm_y, arm_z)
+
             else:
-                # No hand visible — reset debouncer so gestures start fresh
                 dbnc.update("NONE")
 
             draw_hud(frame, raw, confirmed, rx, ry, arm_z,
