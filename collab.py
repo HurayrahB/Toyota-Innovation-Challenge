@@ -5,8 +5,8 @@ Merges pickCVBlock.py (CV-guided pick/place state machine) with
 hand_collab.py (MediaPipe hand detection for speed reduction).
 
 Two cameras run simultaneously:
-  - Laptop camera  (LAPTOP_CAM  = 0) : detects plates and red blocks
-  - Orbbec Astra   (ORBBEC_CAM  = 1) : watches for human hands via MediaPipe
+  - Orbbec Astra   (ORBBEC_CAM  = 1) : detects plates and red blocks (looks down at workspace)
+  - Laptop camera  (LAPTOP_CAM  = 0) : watches for human hands via MediaPipe
 
 When a hand is visible to the Orbbec camera, the arm's PTP speed is halved
 (SPEED_SLOW). When the hand leaves, full speed (SPEED_NORMAL) is restored.
@@ -48,8 +48,8 @@ import lib.DobotDllType as dType
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 COM_PORT    = "COM5"   # change to match DobotLab
-LAPTOP_CAM  = 0        # laptop built-in camera — used for plate/block detection
-ORBBEC_CAM  = 1        # Orbbec Astra UVC index — used for hand safety monitoring
+LAPTOP_CAM  = 0        # laptop built-in camera — used for hand safety monitoring
+ORBBEC_CAM  = 1        # Orbbec Astra UVC index — used for plate/block detection
 
 # Pick/place parameters
 Z_SAFE           = 40    # clearance height (mm) when moving horizontally
@@ -82,7 +82,7 @@ _monitor_lock = threading.Lock()
 
 class CollabMonitor(threading.Thread):
     """
-    Reads the Orbbec Astra camera in a daemon thread and adjusts the Dobot's
+    Reads the laptop camera in a daemon thread and adjusts the Dobot's
     PTP speed based on hand presence. Runs independently of the main loop.
     """
 
@@ -98,19 +98,19 @@ class CollabMonitor(threading.Thread):
     def run(self):
         global _hand_visible, _speed_slow
 
-        # Open Orbbec camera
-        self.cap = cv2.VideoCapture(ORBBEC_CAM)
+        # Open laptop camera for hand monitoring
+        self.cap = cv2.VideoCapture(LAPTOP_CAM)
         if not self.cap.isOpened():
-            print(f"[collab] WARNING: Could not open Orbbec camera at index {ORBBEC_CAM}. "
+            print(f"[collab] WARNING: Could not open laptop camera at index {LAPTOP_CAM}. "
                   "Hand safety monitoring disabled.")
             return
         ret, frame = self.cap.read()
         if not ret or frame is None:
-            print("[collab] WARNING: Orbbec camera opened but returned no frames. "
+            print("[collab] WARNING: Laptop camera opened but returned no frames. "
                   "Hand safety monitoring disabled.")
             self.cap.release()
             return
-        print(f"[collab] Orbbec Astra opened at index {ORBBEC_CAM}. Safety monitor active.")
+        print(f"[collab] Laptop camera opened at index {LAPTOP_CAM}. Safety monitor active.")
 
         with mp_hands.Hands(
             static_image_mode=False,
@@ -197,17 +197,17 @@ def _draw_collab_hud(frame, hand_visible, speed_slow):
 # ── Camera helpers ────────────────────────────────────────────────────────────
 
 def open_laptop_camera():
-    cap = cv2.VideoCapture(LAPTOP_CAM)
+    cap = cv2.VideoCapture(ORBBEC_CAM)
     if not cap.isOpened():
         raise RuntimeError(
-            f"Could not open laptop camera at index {LAPTOP_CAM}. "
-            "Check macOS > System Settings > Privacy & Security > Camera."
+            f"Could not open Orbbec camera at index {ORBBEC_CAM}. "
+            "Ensure the Orbbec Astra is plugged in and camera access is granted."
         )
     ret, frame = cap.read()
     if not ret or frame is None:
         cap.release()
-        raise RuntimeError(f"Laptop camera {LAPTOP_CAM} opened but returned no frames.")
-    print(f"Laptop camera opened at index {LAPTOP_CAM}.")
+        raise RuntimeError(f"Orbbec camera {ORBBEC_CAM} opened but returned no frames.")
+    print(f"Orbbec Astra opened at index {ORBBEC_CAM} for pick/place detection.")
     return cap, frame
 
 
