@@ -466,7 +466,7 @@ def main():
                 next_state()
 
             elif _machine_state == "pick place":
-                completed = phase_execute_batch(api, pick_target, drop_zone)
+                completed = phase_execute_batch(api, drop_zone, pick_target)
                 if completed:
                     next_state()
                 else:
