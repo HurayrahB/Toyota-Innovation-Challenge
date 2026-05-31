@@ -367,12 +367,12 @@ def main():
             if not ret:
                 continue
 
-            frame = cv2.flip(frame, 1)
-
+            # Detect on raw frame so homography coordinates are not mirrored.
+            # Flip only the display copy so the preview looks natural to the user.
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             rgb.flags.writeable = False
             results = detector.process(rgb)
-            frame.flags.writeable = True
+            frame = cv2.flip(frame, 1)
 
             raw       = "NONE"
             confirmed = None
