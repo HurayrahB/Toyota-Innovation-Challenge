@@ -2,18 +2,20 @@
 collab.py — Autonomous pick-and-place with collaborative hand safety.
 
 Single Orbbec Astra camera (Windows UVC) handles everything:
+  - Tracks a light green block continuously for visual reference
   - Detects metal plates (drop zones) via HoughCircles
   - Detects red blocks (pick targets) via HSV masking
   - Detects human hands via MediaPipe — halves arm speed while hand is visible
 
 State machine:
-  scanning plate → scanning target → pick place → scanning plate → …
+  scanning plate → scanning target → pick place → wait_for_input
+                                         ↑ SPACE ────────────────┘
 
 Setup
 -----
 1. Set COM_PORT to match DobotLab (e.g. "COM5").
-2. Set ORBBEC_CAM to the camera index Windows assigns the Orbbec Astra
-   (usually 0 if it is the only camera, 1 if a built-in webcam is present).
+2. Set ORBBEC_CAM to the index Windows assigns the Orbbec Astra
+   (usually 1 if a built-in webcam is also present, 0 if it is the only camera).
 3. Run getTransformationMatrix.py and calibrateCamera.py first to generate
    HomographyMatrix.npy and camera_params.npz.
 4. .venv\\Scripts\\activate && python collab.py
@@ -43,16 +45,17 @@ import lib.DobotDllType as dType
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 COM_PORT   = "COM5"   # change to match DobotLab
-ORBBEC_CAM = 0        # Orbbec Astra UVC index (0 if only camera, 1 if laptop webcam also present)
+ORBBEC_CAM = 1        # Orbbec Astra UVC index (1 if laptop webcam also present, else 0)
 
 # Pick/place parameters
 Z_SAFE          = 40    # clearance height (mm) when moving horizontally
-Z_PICK          = -25   # height (mm) to lower gripper for pick
-STABILITY_LIMIT = 60    # consecutive stable frames before locking detection (~2s at 30fps)
+Z_PICK          = -30   # height (mm) to lower gripper for pick
+STABILITY_LIMIT = 60    # consecutive stable frames before locking (~2 s at 30 fps)
+PIXEL_TOLERANCE = 10    # max pixel drift to count as stationary
 
 # Collaborative safety speed (% of max)
 SPEED_NORMAL = 50
-SPEED_SLOW   = 25       # applied while hand is visible (50% of normal)
+SPEED_SLOW   = 25       # applied while hand is visible (50 % of normal)
 
 # MediaPipe confidence thresholds
 MIN_DETECT_CONF = 0.60
@@ -69,8 +72,9 @@ mp_drawing_styles = mp.solutions.drawing_styles
 _coord_histories = defaultdict(lambda: deque(maxlen=5))
 
 def get_stable_target(idx, new_x, new_y):
-    _coord_histories[idx].append((new_x, new_y))
-    return np.mean(_coord_histories[idx], axis=0)
+    # Return position directly — averaging by contour index causes jumps when
+    # contour ordering changes between frames.
+    return new_x, new_y
 
 
 # ── Coordinate mapping ────────────────────────────────────────────────────────
@@ -82,23 +86,47 @@ def pixel_to_robot(u, v, H):
     return float(xy[0]), float(xy[1])
 
 
-# ── State machine ─────────────────────────────────────────────────────────────
+# ── Position validation ───────────────────────────────────────────────────────
 
-_machine_state = "scanning plate"
+def is_valid_position(x, y, z):
+    """Return False and print a warning if (x, y, z) is outside safe workspace."""
+    if not (-100 < x < 400):
+        print(f"[ERROR] X out of range: {x:.1f}")
+        return False
+    if not (-250 < y < 250):
+        print(f"[ERROR] Y out of range: {y:.1f}")
+        return False
+    if not (-1100 < z < 150):
+        print(f"[ERROR] Z out of range: {z:.1f}")
+        return False
+    return True
 
-def next_state():
-    global _machine_state
-    _machine_state = {
-        "scanning plate":  "scanning target",
-        "scanning target": "pick place",
-        "pick place":      "scanning plate",
-    }.get(_machine_state, "scanning plate")
+
+# ── Green block tracker ───────────────────────────────────────────────────────
+
+def track_green_block(frame, display_frame, H_matrix):
+    """Detect light green block and overlay its robot coordinates on display_frame."""
+    hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array([35, 50, 50]), np.array([85, 255, 255]))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    for cnt in contours:
+        if cv2.contourArea(cnt) < 150:
+            continue
+        M = cv2.moments(cnt)
+        if M["m00"] != 0:
+            cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+            rx, ry = pixel_to_robot(cx, cy, H_matrix)
+            cv2.drawContours(display_frame, [cnt], -1, (255, 255, 0), 2)
+            cv2.putText(display_frame, f"Green: ({rx:.1f}, {ry:.1f})",
+                        (cx, cy - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
 
-# ── HUD helpers ───────────────────────────────────────────────────────────────
+# ── HUD ───────────────────────────────────────────────────────────────────────
 
 def _draw_hud(frame, phase_text, hand_visible, speed_slow):
-    h, w = frame.shape[:2]
+    h, w  = frame.shape[:2]
     GREEN = (0, 220, 0)
     RED   = (0, 0, 220)
     AMBER = (0, 170, 255)
@@ -120,17 +148,15 @@ def _draw_hud(frame, phase_text, hand_visible, speed_slow):
     cv2.putText(frame, spd_text, (w - 280, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.62, spd_col, 2)
 
-    cv2.putText(frame, "Press Q to quit", (w - 190, h - 12),
+    cv2.putText(frame, "Q: quit", (w - 110, h - 12),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, GREY, 1)
 
 
-# ── Hand detection (runs on every frame) ─────────────────────────────────────
+# ── Hand detection (inline, runs every frame) ─────────────────────────────────
 
 def check_hand_and_update_speed(api, frame, detector, speed_slow):
-    """
-    Run MediaPipe on frame, draw landmarks, adjust arm speed.
-    Returns (hand_visible, speed_slow, annotated_frame).
-    """
+    """Run MediaPipe on frame, draw landmarks, adjust arm speed if needed.
+    Returns (hand_visible, updated_speed_slow)."""
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     rgb.flags.writeable = False
     results = detector.process(rgb)
@@ -174,12 +200,12 @@ def phase_detect_plates(cap, api, H_matrix, map1, map2, detector):
         frame         = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         display_frame = frame.copy()
 
-        # CV detection
+        # Plate detection via Hough circles
         gray    = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blurred = cv2.medianBlur(gray, 7)
         circles = cv2.HoughCircles(
             blurred, cv2.HOUGH_GRADIENT, 1, 150,
-            param1=100, param2=35, minRadius=25, maxRadius=55,
+            param1=100, param2=35, minRadius=15, maxRadius=65,
         )
 
         current_list = []
@@ -189,6 +215,9 @@ def phase_detect_plates(cap, api, H_matrix, map1, map2, detector):
                 cv2.circle(display_frame, (i[0], i[1]), i[2], (0, 255, 0), 2)
                 rx, ry = pixel_to_robot(i[0], i[1], H_matrix)
                 current_list.append((rx, ry))
+
+        # Green block tracking overlay
+        track_green_block(frame, display_frame, H_matrix)
 
         if len(current_list) > 0 and len(current_list) == last_count:
             stability_counter += 1
@@ -208,6 +237,7 @@ def phase_detect_plates(cap, api, H_matrix, map1, map2, detector):
         cv2.imshow("Collab Pick & Place — Orbbec", display_frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
+            print("\n[INFO] Q pressed. Exiting...")
             return None, speed_slow
 
         if stability_counter >= STABILITY_LIMIT:
@@ -231,10 +261,10 @@ def phase_detect_targets(cap, api, H_matrix, map1, map2, detector):
         frame         = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         display_frame = frame.copy()
 
-        # CV detection
+        # Red block detection
         hsv  = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
-        mask = (cv2.inRange(hsv, np.array([0,   100,  50]), np.array([10,  255, 255])) +
-                cv2.inRange(hsv, np.array([160, 120,  70]), np.array([180, 255, 255])))
+        mask = (cv2.inRange(hsv, np.array([0,   70,  50]), np.array([15,  255, 255])) |
+                cv2.inRange(hsv, np.array([155, 70,  50]), np.array([180, 255, 255])))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -249,6 +279,13 @@ def phase_detect_targets(cap, api, H_matrix, map1, map2, detector):
                 sx, sy = get_stable_target(idx, rx, ry)
                 current_list.append((sx, sy))
                 cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
+
+        # Green block tracking overlay
+        track_green_block(frame, display_frame, H_matrix)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            print("\n[INFO] Q pressed. Exiting...")
+            return None, speed_slow
 
         if len(current_list) != 0:
             if len(current_list) == last_count:
@@ -269,9 +306,6 @@ def phase_detect_targets(cap, api, H_matrix, map1, map2, detector):
         _draw_hud(display_frame, "PHASE 2 — SCANNING RED BLOCKS", hand_visible, speed_slow)
         cv2.imshow("Collab Pick & Place — Orbbec", display_frame)
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            return None, speed_slow
-
         if stability_counter >= STABILITY_LIMIT:
             print(f"[PHASE 2] Locked {len(current_list)} red blocks.")
             return current_list, speed_slow
@@ -280,6 +314,8 @@ def phase_detect_targets(cap, api, H_matrix, map1, map2, detector):
 # ── Phase 3: pick and place ───────────────────────────────────────────────────
 
 def phase_execute_batch(api, pick_list, drop_list):
+    dType.SetQueuedCmdClear(api)
+    dType.SetQueuedCmdStartExec(api)
     time.sleep(0.5)
 
     if not pick_list or not drop_list:
@@ -294,19 +330,31 @@ def phase_execute_batch(api, pick_list, drop_list):
         drop_x, drop_y = drop_list[i]
         print(f"  Task {i + 1}: pick ({pick_x:.1f}, {pick_y:.1f})  →  drop ({drop_x:.1f}, {drop_y:.1f})")
 
+        if not is_valid_position(pick_x, pick_y, Z_PICK):
+            print("  Skipping — invalid pick position.")
+            continue
+        if not is_valid_position(drop_x, drop_y, Z_SAFE):
+            print("  Skipping — invalid drop position.")
+            continue
+
         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+        time.sleep(0.6)
         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+        time.sleep(0.6)
         dobotArm.close_gripper(api)
+        time.sleep(0.6)
         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+        time.sleep(0.6)
+        dobotArm.move_to_xyz(api, drop_x, drop_y, 30)
         dobotArm.open_gripper(api)
         dobotArm.stop_pump(api)
+        time.sleep(0.4)
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     # More picks than drops — pile remaining onto first drop zone
     if len(pick_list) > len(drop_list):
         drop_x, drop_y = drop_list[0]
-        for i in range(len(drop_list), len(pick_list)):
+        for i in range(batch_size, len(pick_list)):
             pick_x, pick_y = pick_list[i]
             print(f"  Overflow {i + 1}: pick ({pick_x:.1f}, {pick_y:.1f})  →  drop ({drop_x:.1f}, {drop_y:.1f})")
             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
@@ -315,13 +363,50 @@ def phase_execute_batch(api, pick_list, drop_list):
             dobotArm.close_gripper(api)
             time.sleep(0.5)
             dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-            dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+            time.sleep(0.1)
+            dobotArm.move_to_xyz(api, drop_x, drop_y, 25)
             dobotArm.open_gripper(api)
             dobotArm.stop_pump(api)
             dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     print("[PHASE 3] Batch complete.")
     return True
+
+
+# ── Wait-for-input state ──────────────────────────────────────────────────────
+
+def phase_wait_for_input(cap, api, H_matrix, map1, map2, detector):
+    """Show live feed after a completed batch. SPACE re-scans targets, Q quits."""
+    print("\n[WAIT] Batch done. Press SPACE to pick again, Q to quit.")
+    speed_slow = False
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        frame         = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        display_frame = frame.copy()
+
+        track_green_block(frame, display_frame, H_matrix)
+
+        hand_visible, speed_slow = check_hand_and_update_speed(
+            api, display_frame, detector, speed_slow
+        )
+        _draw_hud(display_frame, "DONE — SPACE: pick again  |  Q: quit",
+                  hand_visible, speed_slow)
+        cv2.putText(display_frame, "SPACE: pick again", (20, 130),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.imshow("Collab Pick & Place — Orbbec", display_frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord(" "):
+            print("\n[INFO] SPACE pressed — scanning for targets again...")
+            _coord_histories.clear()
+            return "scanning target"
+        elif key == ord("q"):
+            print("\n[INFO] Q pressed. Exiting...")
+            return "exit"
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -368,8 +453,9 @@ def main():
     dobotArm.stop_pump(api)
     print("Robot ready.\n")
 
-    drop_zone   = None
-    pick_target = None
+    drop_zone    = None
+    pick_target  = None
+    machine_state = "scanning plate"
 
     with mp_hands.Hands(
         static_image_mode=False,
@@ -378,29 +464,42 @@ def main():
         min_tracking_confidence=MIN_TRACK_CONF,
     ) as detector:
         try:
-            while True:
-                if _machine_state == "scanning plate":
+            while machine_state != "exit":
+
+                if machine_state == "scanning plate":
                     drop_zone, _ = phase_detect_plates(
                         cap, api, H_matrix, map1, map2, detector
                     )
                     if drop_zone is None:
                         break
-                    next_state()
+                    if drop_zone:
+                        machine_state = "scanning target"
 
-                elif _machine_state == "scanning target":
+                elif machine_state == "scanning target":
                     pick_target, _ = phase_detect_targets(
                         cap, api, H_matrix, map1, map2, detector
                     )
                     if pick_target is None:
                         break
-                    next_state()
+                    if pick_target:
+                        machine_state = "pick place"
 
-                elif _machine_state == "pick place":
-                    completed = phase_execute_batch(api, pick_target, drop_zone)
-                    if completed:
-                        next_state()
+                elif machine_state == "pick place":
+                    if pick_target is None or drop_zone is None:
+                        print("[WARN] Missing scan data — returning to plate scan.")
+                        machine_state = "scanning plate"
                     else:
-                        break
+                        completed = phase_execute_batch(api, pick_target, drop_zone)
+                        if completed:
+                            machine_state = "wait_for_input"
+                        else:
+                            print("[WARN] Batch failed — re-scanning targets.")
+                            machine_state = "scanning target"
+
+                elif machine_state == "wait_for_input":
+                    machine_state = phase_wait_for_input(
+                        cap, api, H_matrix, map1, map2, detector
+                    )
 
         finally:
             print("\nShutting down…")
