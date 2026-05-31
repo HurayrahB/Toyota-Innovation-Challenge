@@ -3,7 +3,7 @@ import numpy as np
 
 STABILITY_LIMIT = 60
 Z_SAFE = 40
-Z_PICK = -25
+Z_PICK = -35
 
 def pixel_to_robot(u, v, H):
     p = np.array([u, v, 1])

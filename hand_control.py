@@ -47,7 +47,7 @@ import lib.DobotDllType as dType
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-COM_PORT           = "COM7"   # change to match DobotLab (e.g. "COM3")
+COM_PORT           = "COM5"   # change to match DobotLab (e.g. "COM3")
 
 CAMERA_INDEX       = 0        # laptop built-in camera
 MIN_DETECT_CONF    = 0.70
