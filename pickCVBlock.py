@@ -321,23 +321,37 @@ dobotArm.initialize_robot(api)
 dobotArm.open_gripper(api)
 dobotArm.stop_pump(api)
 
-while machine_state == "scanning plate":
-    drop_zone = phase_detect_plates()
-    if drop_zone is not None:
-        next_state()
+drop_zone = None
+pick_target = None
+
+try:
+    while machine_state != "exit":
+        if cv2.waitKey(1) & 0xFF == ord('q'):  # outer safety exit
+            break  # finally block still runs
+        
+        if machine_state == "scanning plate":
+            drop_zone = phase_detect_plates()
+            if drop_zone:
+                next_state()
 
 
-while machine_state == "scanning target":
-    pick_target = phase_detect_targets()
-    if pick_target is not None:
-        next_state()
+        elif machine_state == "scanning target":
+            pick_target = phase_detect_targets()
+            if pick_target:                         # accounts for empty/non-empty list
+                next_state()
 
 
-while machine_state == "pick place":
-    completed = phase_execute_batch(api, pick_target, drop_zone)
-    if completed:
-        next_state()
-    else: break
+        elif machine_state == "pick place":
+            completed = phase_execute_batch(api, pick_target, drop_zone)
+            if completed:
+                next_state()
+            else: 
+                machine_state = "scanning target"
+finally:
+    # this should always run, cleaning up the program
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Cleaned up.")
 
 
 cap.release()

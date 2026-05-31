@@ -230,49 +230,67 @@ dobotArm.initialize_robot(api)
 dobotArm.open_gripper(api)
 dobotArm.stop_pump(api)
 
+# Pre-initialized to None so they are always defined, even if an exception
+# occurs before the scanning phases complete (prevents NameError in finally
+# and guards against the pick place state running with undefined variables)
 drop_zone = None
 pick_target = None
 
-while machine_state != "exit":
-    if machine_state == "scanning plate":
-        drop_zone = phase_detect_plates()
-        if drop_zone is not None:
-            machine_state = "scanning target"
-            
-    elif machine_state == "scanning target":
-        pick_target = phase_detect_targets()
-        if pick_target is not None:
-            machine_state = "pick place"
-            
-    elif machine_state == "pick place":
-        completed = phase_execute_batch(api, pick_target, drop_zone)
-        machine_state = "wait_for_input"
-        
-    elif machine_state == "wait_for_input":
-        # Loop to wait for user input (space or q) while continuously tracking green block
-        while True:
-            ret, frame = cap.read()
-            if not ret: continue
-            
-            frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
-            display_frame = frame.copy()
-            
-            track_green_block(frame, display_frame)
-            
-            cv2.putText(display_frame, "Press SPACE to pick again, Q to quit", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            cv2.imshow("Detection", display_frame)
-            
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord(' '):
-                print("\n[INFO] SPACE pressed. Scanning for targets again...")
-                # Reset stability histories for a fresh scan
-                coord_histories.clear()
-                machine_state = "scanning target"
-                break
-            elif key == ord('q'):
-                print("\n[INFO] Q pressed. Exiting...")
-                machine_state = "exit"
-                break
+try:
+    while machine_state != "exit":
+        if cv2.waitKey(1) & 0xFF == ord('q'):  # outer safety exit between states
+            break
 
-cap.release()
-cv2.destroyAllWindows()
+        if machine_state == "scanning plate":
+            drop_zone = phase_detect_plates()
+            if drop_zone:                           # non-empty list check ([] is falsy)
+                machine_state = "scanning target"
+
+        elif machine_state == "scanning target":
+            pick_target = phase_detect_targets()
+            if pick_target:                         # non-empty list check ([] is falsy)
+                machine_state = "pick place"
+
+        elif machine_state == "pick place":
+            # Guard against reaching this state before scans complete
+            if pick_target is None or drop_zone is None:
+                print("[WARN] Missing scan data, returning to plate scan...")
+                machine_state = "scanning plate"
+            else:
+                completed = phase_execute_batch(api, pick_target, drop_zone)
+                if completed:
+                    machine_state = "wait_for_input"
+                else:
+                    print("[WARN] Batch failed, re-scanning targets...")
+                    machine_state = "scanning target"
+
+        elif machine_state == "wait_for_input":
+            while True:
+                ret, frame = cap.read()
+                if not ret: continue
+
+                frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+                display_frame = frame.copy()
+
+                track_green_block(frame, display_frame)
+
+                cv2.putText(display_frame, "Press SPACE to pick again, Q to quit", (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.imshow("Detection", display_frame)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord(' '):
+                    print("\n[INFO] SPACE pressed. Scanning for targets again...")
+                    coord_histories.clear()         # reset for a fresh scan
+                    machine_state = "scanning target"
+                    break
+                elif key == ord('q'):
+                    print("\n[INFO] Q pressed. Exiting...")
+                    machine_state = "exit"
+                    break                           # breaks inner loop; outer checks "exit"
+
+finally:
+    # Always runs: clean exit on q, break, Ctrl+C, or unhandled exception
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Cleaned up.")
