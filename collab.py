@@ -82,8 +82,9 @@ _monitor_lock = threading.Lock()
 
 class CollabMonitor(threading.Thread):
     """
-    Reads the laptop camera in a daemon thread and adjusts the Dobot's
-    PTP speed based on hand presence. Runs independently of the main loop.
+    Reads the laptop camera (LAPTOP_CAM) in a daemon thread and adjusts
+    the Dobot's PTP speed based on hand presence detected via MediaPipe.
+    Runs independently of the main pick/place loop.
     """
 
     def __init__(self, api):
@@ -158,7 +159,7 @@ class CollabMonitor(threading.Thread):
 
                 # Draw HUD on Orbbec window
                 _draw_collab_hud(frame, hand_detected, _speed_slow)
-                cv2.imshow("Collab Safety — Orbbec", frame)
+                cv2.imshow("Collab Safety — Laptop Camera", frame)
                 cv2.waitKey(1)
 
         self.cap.release()
@@ -196,7 +197,7 @@ def _draw_collab_hud(frame, hand_visible, speed_slow):
 
 # ── Camera helpers ────────────────────────────────────────────────────────────
 
-def open_laptop_camera():
+def open_orbbec_camera():
     cap = cv2.VideoCapture(ORBBEC_CAM)
     if not cap.isOpened():
         raise RuntimeError(
@@ -284,7 +285,7 @@ def phase_detect_plates(cap, H_matrix, map1, map2):
 
         # Show collab status on main window
         _draw_main_status(display_frame)
-        cv2.imshow("Pick & Place — Laptop Camera", display_frame)
+        cv2.imshow("Pick & Place — Orbbec Camera", display_frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             return None
@@ -338,7 +339,7 @@ def phase_detect_targets(cap, H_matrix, map1, map2):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if progress < 100 else (255, 255, 0), 2)
 
         _draw_main_status(display_frame)
-        cv2.imshow("Pick & Place — Laptop Camera", display_frame)
+        cv2.imshow("Pick & Place — Orbbec Camera", display_frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             return None
@@ -427,7 +428,7 @@ def main():
     dist_coeffs   = data["dist_coeffs"]
 
     # Open laptop camera and compute undistort maps once
-    cap, first_frame = open_laptop_camera()
+    cap, first_frame = open_orbbec_camera()
     h, w = first_frame.shape[:2]
     new_K, _ = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w, h), 1)
     map1, map2 = cv2.initUndistortRectifyMap(
