@@ -84,7 +84,6 @@ def is_valid_position(x, y, z):
         print(f"[ERROR] Y out of range: {y:.1f}")
         return False
     if not (-1100 < z < 150):
-    if not (-1100 < z < 150):
         print(f"[ERROR] Z out of range: {z:.1f}")
         return False
     return True
