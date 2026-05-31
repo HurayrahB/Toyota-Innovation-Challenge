@@ -45,7 +45,7 @@ class CollabModeLogic:
     def _scan_plates(self, frame, display_frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blurred = cv2.medianBlur(gray, 7)
-        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 150, param1=100, param2=35, minRadius=15, maxRadius=65)
+        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 150, param1=100, param2=35, minRadius=25, maxRadius=55)
 
         current_list = []
         if circles is not None:
@@ -66,15 +66,23 @@ class CollabModeLogic:
 
         if self.stability_counter >= STABILITY_LIMIT:
             self.drop_zone = current_list
-            print(f"Locked {len(current_list)} plates.")
+            print(f"[SUCCESS] Locked {len(current_list)} plates.")
             self.state = "scanning target"
             self.stability_counter = 0
             self.last_count = 0
 
+    def get_stable_target(self, idx, new_x, new_y):
+        from collections import deque
+        if not hasattr(self, 'coord_histories'):
+            from collections import defaultdict
+            self.coord_histories = defaultdict(lambda: deque(maxlen=5))
+        self.coord_histories[idx].append((new_x, new_y))
+        return np.mean(self.coord_histories[idx], axis=0)
+
     def _scan_targets(self, frame, display_frame):
         hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5,5), 0), cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array([0, 70, 50]), np.array([15, 255, 255])) | \
-               cv2.inRange(hsv, np.array([155, 70, 50]), np.array([180, 255, 255]))
+        mask = cv2.inRange(hsv, np.array([0,100,50]), np.array([10,255,255])) + \
+               cv2.inRange(hsv, np.array([160,120,70]), np.array([180,255,255]))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -86,7 +94,8 @@ class CollabModeLogic:
             if M["m00"] != 0:
                 cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
                 rx, ry = pixel_to_robot(cx, cy, self.H_matrix)
-                current_list.append((rx, ry))
+                smooth_x, smooth_y = self.get_stable_target(idx, rx, ry)
+                current_list.append((smooth_x, smooth_y))
                 cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
 
         if len(current_list) != 0:

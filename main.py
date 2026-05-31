@@ -38,7 +38,9 @@ DEBOUNCE_FRAMES    = 18       # frames a gesture must hold before it fires
 TRACK_DEADZONE_MM  = 8        # mm — minimum hand movement to trigger a TRACK move
 Z_HOVER            = 50       # mm — Z height used during TRACK mode
 Z_STEP             = 15       # mm — how much to raise/lower per MOVE_UP/DOWN command
+Y_STEP             = 15       # mm — how much to move left/right per command
 MOVE_HOLD_INTERVAL = 0.7      # seconds — repeat rate when MOVE_UP/DN gesture is held
+THUMB_THRESHOLD    = 0.04     # normalised units — how far thumb must stick out
 
 # Safe workspace bounds (mm in Dobot frame). Arm will not be commanded outside these.
 WS_X = (150, 310)
@@ -57,23 +59,34 @@ def _fingers_extended(lm, handedness):
     middle_up = lm[12].y < lm[10].y
     ring_up   = lm[16].y < lm[14].y
     pinky_up  = lm[20].y < lm[18].y
+    # Thumb: requires clearly extended past knuckle (less sensitive)
     if handedness == "Right":
-        thumb_up = lm[4].x < lm[3].x
+        thumb_up = (lm[3].x - lm[4].x) > THUMB_THRESHOLD
     else:
-        thumb_up = lm[4].x > lm[3].x
+        thumb_up = (lm[4].x - lm[3].x) > THUMB_THRESHOLD
     return thumb_up, index_up, middle_up, ring_up, pinky_up
 
 def classify_gesture(hand_landmarks, handedness="Right"):
     lm = hand_landmarks.landmark
     thumb, idx, mid, ring, pinky = _fingers_extended(lm, handedness)
+    
     if thumb and not idx and not mid and not ring and not pinky:
         return "HOME"
+        
+    # Middle finger only → BOMB (plunge to lowest Z)
+    if mid and not idx and not ring and not pinky and not thumb:
+        return "BOMB"
+        
     n = sum([thumb, idx, mid, ring, pinky])
-    if n == 5:                                         return "TRACK"
-    if n == 0:                                         return "GRIP_TOGGLE"
-    if idx and not mid and not ring and not pinky:     return "MOVE_UP"
-    if idx and mid and not ring and not pinky:         return "MOVE_DN"
-    if idx and mid and ring and not pinky:             return "OPEN_GRIP"
+    
+    if n == 5:                                                      return "TRACK"
+    if n == 0:                                                      return "GRIP_TOGGLE"
+    if idx and not mid and not ring and not pinky:                  return "MOVE_UP"
+    if idx and mid and not ring and not pinky:                      return "MOVE_DN"
+    if idx and mid and ring and not pinky:                          return "OPEN_GRIP"
+    if pinky and not idx and not mid and not ring and not thumb:    return "MOVE_LEFT"
+    if ring and not idx and not mid and not pinky and not thumb:    return "MOVE_RIGHT"
+    
     return "NONE"
 
 
@@ -202,29 +215,32 @@ class RobotController:
             print("Hand cleared — speed restored to normal.")
 
     def _execute_batch(self, pick_list, drop_list, z_safe, z_pick):
-        dType.SetQueuedCmdClear(self.api)
-        dType.SetQueuedCmdStartExec(self.api)
         time.sleep(0.5)
+        if len(pick_list) == 0 or len(drop_list) == 0:
+            print("missing targets, aborting")
+            return False
+        
         batch_size = min(len(pick_list), len(drop_list))
+        print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
+
         for i in range(batch_size):
             pick_x, pick_y = pick_list[i]
             drop_x, drop_y = drop_list[i]
+
+            print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
             dobotArm.move_to_xyz(self.api, pick_x, pick_y, z_safe)
-            time.sleep(0.6)
             dobotArm.move_to_xyz(self.api, pick_x, pick_y, z_pick)
-            time.sleep(0.6)
             dobotArm.close_gripper(self.api)
-            time.sleep(0.6)
             dobotArm.move_to_xyz(self.api, pick_x, pick_y, z_safe)
-            time.sleep(0.6)
+            
             dobotArm.move_to_xyz(self.api, drop_x, drop_y, z_safe)
             dobotArm.open_gripper(self.api)
             dobotArm.stop_pump(self.api)
-            time.sleep(0.4)
             dobotArm.move_to_xyz(self.api, drop_x, drop_y, z_safe)
+
         if len(pick_list) > len(drop_list):
             drop_x, drop_y = drop_list[0]
-            for i in range(batch_size, len(pick_list)):
+            for i in range(len(pick_list)):
                 pick_x, pick_y = pick_list[i]
                 dobotArm.move_to_xyz(self.api, pick_x, pick_y, z_safe)
                 dobotArm.move_to_xyz(self.api, pick_x, pick_y, z_pick)
@@ -233,10 +249,14 @@ class RobotController:
                 time.sleep(0.5)
                 dobotArm.move_to_xyz(self.api, pick_x, pick_y, z_safe)
                 time.sleep(0.1)
+                
                 dobotArm.move_to_xyz(self.api, drop_x, drop_y, z_safe)
                 dobotArm.open_gripper(self.api)
                 dobotArm.stop_pump(self.api)
                 dobotArm.move_to_xyz(self.api, drop_x, drop_y, z_safe)
+        
+        print("\nBatch Complete.")
+        return True
 
 
 # ── Camera ────────────────────────────────────────────────────────────────────
@@ -259,35 +279,54 @@ def open_camera(candidates=CAMERA_CANDIDATES):
 # ── HUD ───────────────────────────────────────────────────────────────────────
 
 _LEGEND = [
-    "Open palm   → TRACK XY",
-    "Index only  → MOVE UP",
-    "Peace sign  → MOVE DOWN",
-    "Fist        → GRIP toggle",
-    "3 fingers   → OPEN grip",
-    "Thumb up    → HOME",
-    "No gesture  → HOLD",
+    "Open palm   -> TRACK XY",
+    "Index only  -> MOVE UP",
+    "Peace sign  -> MOVE DOWN",
+    "Fist        -> GRIP toggle",
+    "3 fingers   -> OPEN grip",
+    "Thumb up    -> HOME",
+    "Pinky only  -> MOVE LEFT",
+    "Ring only   -> MOVE RIGHT",
+    "Middle only -> BOMB (lowest Z)",
+    "No gesture  -> HOLD",
 ]
+
+GESTURE_COLORS = {
+    "TRACK":       (0, 220, 0),
+    "MOVE_UP":     (0, 200, 255),
+    "MOVE_DN":     (0, 140, 255),
+    "GRIP_TOGGLE": (255, 180, 0),
+    "OPEN_GRIP":   (255, 220, 0),
+    "HOME":        (200, 0, 255),
+    "MOVE_LEFT":   (0, 255, 200),
+    "MOVE_RIGHT":  (255, 100, 200),
+    "BOMB":        (0, 0, 255),
+}
 
 def draw_hud(frame, raw, confirmed, rx, ry, z, gripper_closed, busy, safety):
     h, w = frame.shape[:2]
+    
+    GREEN = (0, 220, 0)
+    AMBER = (0, 170, 255)
+    RED   = (0, 0, 220)
+    GREY  = (180, 180, 180)
+
+    # Top bar
     bar = frame.copy()
     cv2.rectangle(bar, (0, 0), (w, 115), (15, 15, 15), -1)
     cv2.addWeighted(bar, 0.55, frame, 0.45, 0, frame)
 
-    GREEN  = (0, 220, 0)
-    AMBER  = (0, 170, 255)
-    RED    = (0, 0, 220)
-    GREY   = (180, 180, 180)
+    cv2.putText(frame, f"Raw : {raw}", (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, GREY, 1)
 
-    cv2.putText(frame, f"Raw : {raw}",       (14, 30),  cv2.FONT_HERSHEY_SIMPLEX, 0.65, GREY,  1)
-    cv2.putText(frame, f"Act : {confirmed or '---'}",
-                (14, 58),  cv2.FONT_HERSHEY_SIMPLEX, 0.75,
-                GREEN if confirmed and confirmed != "NONE" else AMBER, 2)
+    act_color = GESTURE_COLORS.get(confirmed, AMBER) if confirmed and confirmed != "NONE" else AMBER
+    cv2.putText(frame, f"Act : {confirmed or '---'}", (14, 58),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, act_color, 2)
+
     cv2.putText(frame, f"XY ({rx:+.0f}, {ry:+.0f}) mm   Z {z:.0f} mm",
-                (14, 88),  cv2.FONT_HERSHEY_SIMPLEX, 0.58, GREY, 1)
+                (14, 88), cv2.FONT_HERSHEY_SIMPLEX, 0.58, GREY, 1)
 
     if safety:
-        status, col = "SAFETY HOLD", RED
+        status, col = "SAFETY HOLD — hand in workspace", RED
     elif busy:
         status, col = "ROBOT BUSY", AMBER
     elif gripper_closed:
@@ -295,11 +334,11 @@ def draw_hud(frame, raw, confirmed, rx, ry, z, gripper_closed, busy, safety):
     else:
         status, col = "READY", GREEN
 
-    cv2.putText(frame, status, (w - 310, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.65, col, 2)
+    cv2.putText(frame, status, (w - 330, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.65, col, 2)
 
     for i, line in enumerate(_LEGEND):
-        cv2.putText(frame, line, (w - 268, h - len(_LEGEND) * 22 + i * 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (150, 150, 150), 1)
+        cv2.putText(frame, line, (w - 285, h - len(_LEGEND) * 20 + i * 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 150, 150), 1)
 
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
@@ -319,11 +358,15 @@ def main():
     robot  = RobotController(api)
     dbnc   = GestureDebouncer(required=DEBOUNCE_FRAMES)
     
-    print("Opening Laptop Camera...")
-    cap = open_camera()
+    print("Opening Laptop Camera (0)...")
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Warning: Could not open Laptop Camera 0")
     
-    print("Opening Ceiling Camera...")
+    print("Opening Ceiling Camera (1)...")
     cap1 = cv2.VideoCapture(1)
+    if not cap1.isOpened():
+        print("Warning: Could not open Ceiling Camera 1")
     
     if Path("camera_params.npz").exists() and cap1.isOpened():
         data = np.load("camera_params.npz")
@@ -417,6 +460,16 @@ def main():
                             new_z = clamp(arm_x, arm_y, arm_z - Z_STEP)[2]
                             robot.send("xyz", arm_x, arm_y, new_z)
                             arm_z, last_move_time = new_z, now
+                    elif confirmed == "MOVE_LEFT":
+                        if dbnc.fire_once() or (dbnc.continuous() and now - last_move_time > MOVE_HOLD_INTERVAL and not robot.busy.is_set()):
+                            new_y = clamp(arm_x, arm_y - Y_STEP, arm_z)[1]
+                            robot.send("xyz", arm_x, new_y, arm_z)
+                            arm_y, last_move_time = new_y, now
+                    elif confirmed == "MOVE_RIGHT":
+                        if dbnc.fire_once() or (dbnc.continuous() and now - last_move_time > MOVE_HOLD_INTERVAL and not robot.busy.is_set()):
+                            new_y = clamp(arm_x, arm_y + Y_STEP, arm_z)[1]
+                            robot.send("xyz", arm_x, new_y, arm_z)
+                            arm_y, last_move_time = new_y, now
                     elif confirmed == "GRIP_TOGGLE" and dbnc.fire_once():
                         robot.send("open") if robot.gripper_closed else robot.send("close")
                     elif confirmed == "OPEN_GRIP" and dbnc.fire_once():
@@ -424,6 +477,9 @@ def main():
                     elif confirmed == "HOME" and dbnc.fire_once():
                         arm_x, arm_y, arm_z = float(dobotArm.home_pos[0]), float(dobotArm.home_pos[1]), float(Z_HOVER)
                         robot.send("home")
+                    elif confirmed == "BOMB" and dbnc.fire_once():
+                        arm_z = float(WS_Z[0])
+                        robot.send("xyz", arm_x, arm_y, arm_z)
                 else:
                     dbnc.update("NONE")
 
