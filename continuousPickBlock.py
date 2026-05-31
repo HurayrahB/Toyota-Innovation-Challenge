@@ -77,13 +77,13 @@ def track_green_block(frame, display_frame):
 # ---------------------------------------------------------
 def is_valid_position(x, y, z):
     # Dobot Magician safe workspace (mm)
-    if not (150 < x < 320):
+    if not (100 < x < 320):
         print(f"[ERROR] X out of range: {x:.1f}")
         return False
-    if not (-150 < y < 150):
+    if not (-200 < y < 150):
         print(f"[ERROR] Y out of range: {y:.1f}")
         return False
-    if not (-60 < z < 150):
+    if not (-1100 < z < 150):
         print(f"[ERROR] Z out of range: {z:.1f}")
         return False
     return True
