@@ -19,8 +19,9 @@ PIXEL_TOLERANCE = 10
 coord_histories = defaultdict(lambda: deque(maxlen=5))
 
 def get_stable_target(idx, new_x, new_y):
-    coord_histories[idx].append((new_x, new_y))
-    return np.mean(coord_histories[idx], axis=0)
+    # Avoid averaging based on contour index, as contour sorting order fluctuates
+    # causing targets to jump wildly between frames.
+    return new_x, new_y
 
 machine_state = "scanning plate" 
 
@@ -110,7 +111,9 @@ def phase_detect_plates():
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
         cv2.putText(display_frame, f"LOCKING PLATES: {progress}%", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.imshow("Detection", display_frame)
-        cv2.waitKey(1)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("\n[INFO] Q pressed. Exiting...")
+            exit(0)
 
         if stability_counter >= STABILITY_LIMIT:
             print(f"Locked {len(current_list)} plates.")
@@ -132,8 +135,8 @@ def phase_detect_targets():
         display_frame = frame.copy()
         
         hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5,5), 0), cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array([0,100,50]), np.array([10,255,255])) + \
-               cv2.inRange(hsv, np.array([160,120,70]), np.array([180,255,255]))
+        mask = cv2.inRange(hsv, np.array([0, 70, 50]), np.array([15, 255, 255])) | \
+               cv2.inRange(hsv, np.array([155, 70, 50]), np.array([180, 255, 255]))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -153,7 +156,9 @@ def phase_detect_targets():
                     
         track_green_block(frame, display_frame)
 
-        cv2.waitKey(1)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("\n[INFO] Q pressed. Exiting...")
+            exit(0)
 
         # --- STABILITY LOGIC ---
         if len(current_list) != 0:
@@ -212,7 +217,7 @@ def phase_execute_batch(api, pick_list, drop_list):
 
     if len(pick_list) > len(drop_list):
          drop_x, drop_y = drop_list[0]
-         for i in range(len(pick_list)):
+         for i in range(batch_size, len(pick_list)):
              pick_x, pick_y = pick_list[i]
              dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
              dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)

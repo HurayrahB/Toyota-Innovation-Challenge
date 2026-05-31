@@ -30,8 +30,6 @@ Z_SAFE = 40 #what is the clearance distance for the robot arm to avoid collision
 Z_PICK = -25 #what is the  height for the robot claw to successfully pick up the target?
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
-SHOW_HAND_WINDOW = True
-HAND_MIN_AREA = 4500
 
 from collections import defaultdict, deque
 coord_histories = defaultdict(lambda: deque(maxlen=5)) # 5 frame window
@@ -64,60 +62,6 @@ def pixel_to_robot(u, v, H):
     xy = H @ p
     xy /= xy[2]
     return xy[0], xy[1]
-
-
-def detect_hands(frame):
-    blurred = cv2.GaussianBlur(frame, (5, 5), 0)
-    ycrcb = cv2.cvtColor(blurred, cv2.COLOR_BGR2YCrCb)
-
-    lower_skin = np.array([0, 135, 85], dtype=np.uint8)
-    upper_skin = np.array([255, 180, 135], dtype=np.uint8)
-    mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    hand_regions = []
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if area < HAND_MIN_AREA:
-            continue
-
-        x, y, w_box, h_box = cv2.boundingRect(contour)
-        hand_regions.append({
-            "bbox": (x, y, w_box, h_box),
-            "contour": contour,
-            "area": area,
-        })
-
-    return hand_regions
-
-
-def show_hand_detection(frame):
-    if not SHOW_HAND_WINDOW:
-        return
-
-    display_frame = frame.copy()
-    hand_regions = detect_hands(frame)
-
-    for region in hand_regions:
-        x, y, w_box, h_box = region["bbox"]
-        cv2.drawContours(display_frame, [region["contour"]], -1, (0, 0, 255), 2)
-        cv2.rectangle(display_frame, (x, y), (x + w_box, y + h_box), (0, 0, 255), 2)
-        cv2.putText(
-            display_frame,
-            f"HAND A={int(region['area'])}",
-            (x, max(20, y - 10)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (0, 0, 255),
-            2,
-        )
-
-    status_text = "HAND DETECTED" if hand_regions else "NO HAND DETECTED"
-    status_color = (0, 0, 255) if hand_regions else (0, 255, 0)
-    cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-    cv2.imshow("Hand Detection", display_frame)
 
 
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
@@ -174,7 +118,6 @@ def phase_detect_plates():
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
         cv2.putText(display_frame, f"LOCKING PLATES: {progress}%", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.imshow("Detection", display_frame)
-        show_hand_detection(frame)
         cv2.waitKey(1)
 
         if stability_counter >= STABILITY_LIMIT:
@@ -241,7 +184,6 @@ def phase_detect_targets():
         cv2.putText(display_frame, f"LOCKING TARGETS: {progress}%", (20, 40), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         cv2.imshow("Detection", display_frame)
-        show_hand_detection(frame)
         
         # --- EXIT CONDITION ---
         if stability_counter >= STABILITY_LIMIT:
