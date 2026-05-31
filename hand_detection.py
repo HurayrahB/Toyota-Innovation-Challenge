@@ -24,7 +24,7 @@ if not hasattr(mp, "solutions"):
     )
 
 
-CAMERA_CANDIDATES       = (1, 0, 2)
+CAMERA_CANDIDATES       = (0,)   # laptop built-in camera
 MAX_HANDS               = 2
 MIN_DETECTION_CONFIDENCE = 0.5
 MIN_TRACKING_CONFIDENCE  = 0.5
@@ -70,8 +70,8 @@ def _fingers_extended(lm, handedness):
     middle_up = lm[12].y < lm[10].y
     ring_up   = lm[16].y < lm[14].y
     pinky_up  = lm[20].y < lm[18].y
-    # Require a larger gap (0.04 normalised units) so thumb must be clearly extended
-    THUMB_THRESHOLD = 0.04
+    # Require a larger gap (0.02 normalised units) so thumb must be clearly extended
+    THUMB_THRESHOLD = 0.03
     if handedness == "Right":
         thumb_up = (lm[3].x - lm[4].x) > THUMB_THRESHOLD
     else:

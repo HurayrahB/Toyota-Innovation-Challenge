@@ -49,7 +49,7 @@ import lib.DobotDllType as dType
 
 COM_PORT           = "COM7"   # change to match DobotLab (e.g. "COM3")
 
-CAMERA_CANDIDATES  = (1, 0, 2)
+CAMERA_INDEX       = 0        # laptop built-in camera
 MIN_DETECT_CONF    = 0.70
 MIN_TRACK_CONF     = 0.50
 
@@ -65,6 +65,7 @@ THUMB_THRESHOLD    = 0.04     # normalised units — how far thumb must stick ou
 WS_X = (150, 310)
 WS_Y = (-140, 140)
 WS_Z = (-25,  100)
+
 
 mp_hands          = mp.solutions.hands
 mp_drawing        = mp.solutions.drawing_utils
@@ -241,21 +242,19 @@ class RobotController:
 
 # ── Camera ────────────────────────────────────────────────────────────────────
 
-def open_camera(candidates=CAMERA_CANDIDATES):
-    for idx in candidates:
-        cap = cv2.VideoCapture(idx)
-        if not cap.isOpened():
-            cap.release()
-            continue
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            cap.release()
-            continue
-        print(f"Camera opened at index {idx}.")
-        return cap
-    raise RuntimeError(
-        "No camera found. Check macOS > System Settings > Privacy & Security > Camera."
-    )
+def open_camera():
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+    if not cap.isOpened():
+        raise RuntimeError(
+            f"Could not open laptop camera at index {CAMERA_INDEX}. "
+            "Check macOS > System Settings > Privacy & Security > Camera."
+        )
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        cap.release()
+        raise RuntimeError(f"Camera {CAMERA_INDEX} opened but returned no frames.")
+    print(f"Laptop camera opened at index {CAMERA_INDEX}.")
+    return cap
 
 
 # ── HUD ───────────────────────────────────────────────────────────────────────
