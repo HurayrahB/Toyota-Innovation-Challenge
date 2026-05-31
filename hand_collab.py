@@ -45,7 +45,7 @@ import lib.DobotDllType as dType
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-COM_PORT      = "COM7"   # change to match DobotLab
+COM_PORT      = "COM5"   # change to match DobotLab
 CAMERA_INDEX  = 1        # Orbbec Astra UVC index (change if OS assigns a different index)
 
 MIN_DETECT_CONF = 0.60

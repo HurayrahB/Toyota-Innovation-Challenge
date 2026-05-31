@@ -19,7 +19,7 @@ the robot out of the way. You can change the coordinates here if you really want
 """
 home_pos = [200,100,50]
 
-def initialize_robot(api):
+def initialize_robot(api, port=None):
     #detect the robot's com port
     com_port = dType.SearchDobot(api)[0]
     
@@ -28,12 +28,15 @@ def initialize_robot(api):
         print("Error: The robot either isn't on or isn't responding. Exiting now")
         exit()
     
+    #use the explicitly passed port or default to the detected one
+    target_port = port if port else com_port
+    
     #we've found it, so let's try to connect
-    state = dType.ConnectDobot(api, "COM7", 115200)[0]
+    state = dType.ConnectDobot(api, target_port, 115200)[0]
     
     #If the connection failed at this point, we also can't proceed, so we need to exit
     if state != dType.DobotConnect.DobotConnect_NoError:
-        print("Failed to connect to Dobot!")
+        print(f"Failed to connect to Dobot on {target_port}!")
         exit()
     
     """
